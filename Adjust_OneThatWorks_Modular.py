@@ -2,7 +2,7 @@ import cv2
 import mediapipe as mp
 import time
 import serial
-import RPi.GPIO as GPIO  # For ultrasonic sensors (placeholder)
+#import RPi.GPIO as GPIO  #  ultrasonic sensors lib?
 
 class CameraNode:
     """
@@ -85,10 +85,10 @@ class UltrasonicSensors:
 
         if self.enabled:
             # Initialize GPIO
-            GPIO.setmode(GPIO.BCM)
-            # Example placeholder code; actual pins depend on your wiring:
-            # GPIO.setup(self.front_left_pins[0], GPIO.OUT)
-            # GPIO.setup(self.front_left_pins[1], GPIO.IN)
+            #GPIO.setmode(GPIO.BCM)
+                # Example placeholder code; actual pins depend on your wiring:
+                # GPIO.setup(self.front_left_pins[0], GPIO.OUT)
+                # GPIO.setup(self.front_left_pins[1], GPIO.IN)
             pass
 
     def read_sensors(self):
@@ -122,13 +122,14 @@ class UltrasonicSensors:
         """
         pass
 
+    """
     def cleanup(self):
-        """
-        Cleans up GPIO if enabled.
-        """
-        if self.enabled:
-            GPIO.cleanup()
 
+        #cleans up GPIO if enabled.
+
+        if slef.enabled:
+            GPIO.cleanup()
+    """
 
 class DistanceCalculator:
     """
@@ -171,11 +172,12 @@ class MovementController:
     """
 
     def __init__(self,
+                 kv=1.0,
+                 kw=1.0,
                  target_distance=0.5,
                  distance_tolerance=0.1,
-                 angle_tolerance_deg=25,
-                 kv=1.0,
-                 kw=1.0):
+                 angle_tolerance_deg=25
+                 ):
         self.target_distance = target_distance
         self.distance_tolerance = distance_tolerance
         self.angle_tolerance_deg = angle_tolerance_deg
@@ -217,20 +219,22 @@ class SerialOutput:
     """
 
     def __init__(self, port, baudrate=9600):
-		return
+	
         self.ser = serial.Serial(port, baudrate)
+        return
 
     def send_velocities(self, linear_vel, angular_vel):
         """
         Sends the linear and angular velocities over serial as a
         comma-separated string (e.g. "0.10,3.50").
         """
-		print(linear_vel)
-		print(angular_vel)
-		return
-		
+
+        angular_vel = angular_vel * (3.141592653589793 / 180)  # Convert degrees to radians
         msg = f"{linear_vel:.3f},{angular_vel:.3f}\n"
         self.ser.write(msg.encode('utf-8'))
+        print(linear_vel)
+        print(angular_vel)
+        return
 
     def close(self):
         """
@@ -256,17 +260,30 @@ class DistanceAngleTracker:
                  reference_distance=0.5,
                  polling_interval=0.1,
                  port='/dev/tty.usbserial-022680BC',
-                 baudrate=9600):
+                 baudrate=9600,
+                 serial_enabled = False,
+                 draw_enabled = False,
+                 kv=1.0,
+                 kw=1.0):
         # Interval for processing
+        self.draw_enabled = draw_enabled
+        self.serial_enabled = serial_enabled
         self.polling_interval = polling_interval
         self.last_poll_time = time.time()
 
         # Initialize nodes
+        print("Initializing Camera")
         self.camera_node = CameraNode(camera_index=camera_index)
+        print("Initializing Pose Node")
         self.pose_node = PoseEstimationNode()
+        print("Initializing Distance Calculator")
         self.distance_calculator = DistanceCalculator(reference_distance=reference_distance)
-        self.movement_controller = MovementController(target_distance=target_distance)
-        self.serial_output = SerialOutput(port=port, baudrate=baudrate)
+        print("Initializing Controller")
+        self.movement_controller = MovementController(kv=kv,kw=kw,target_distance=target_distance)
+        if(serial_enabled):
+            print("Initializing Serial Node")
+            self.serial_output = SerialOutput(port=port, baudrate=baudrate)
+        print("Initializing Ultrasonic Node")
         self.ultrasonic_node = UltrasonicSensors(enable=False)  # Disabled for now
 
         # For visualization / debugging
@@ -325,7 +342,7 @@ class DistanceAngleTracker:
 
         cv2.destroyWindow("Calibrate Reference Distance")
 
-    def start_tracking(self):
+    def start_tracking(self, draw_enabled = False):
         """
         Main loop that captures frames, estimates distance & angle,
         computes velocities, and sends them over serial.
@@ -384,10 +401,12 @@ class DistanceAngleTracker:
                     linear_vel, angular_vel = self.movement_controller.compute_control(distance, angle_offset_deg)
 
                     # Send to serial
-                    self.serial_output.send_velocities(linear_vel, angular_vel)
+                    if(self.serial_enabled):
+                        self.serial_output.send_velocities(linear_vel, angular_vel)
 
                     # OPTIONAL: Visual feedback
-                    self._draw_info(frame, distance, linear_vel, angular_vel, angle_offset_deg, user_center_x, shoulder_y)
+                    if(self.draw_enabled):
+                        self._draw_info(frame, distance, linear_vel, angular_vel, angle_offset_deg, user_center_x, shoulder_y)
                 else:
                     # If pose not detected
                     cv2.putText(frame, "No Pose Detected", (10, 20), 
@@ -424,6 +443,8 @@ class DistanceAngleTracker:
 #             MAIN
 # ----------------------------
 if __name__ == "__main__":
+
+    print("Starting Script")
     # Example usage
     tracker = DistanceAngleTracker(
         camera_index=0,
@@ -431,7 +452,11 @@ if __name__ == "__main__":
         reference_distance=0.5,     # Known distance for calibration
         polling_interval=0.1,       # Interval between processing frames
         port='/dev/tty.usbserial-022680BC',  # Update with your actual port
-        baudrate=9600
+        baudrate=9600,
+        serial_enabled=False,
+        draw_enabled=True,
+        kv=1.0,
+        kw=1.0
     )
 
     # First, calibrate reference height
@@ -439,3 +464,5 @@ if __name__ == "__main__":
 
     # Start the main tracking loop
     tracker.start_tracking()
+
+    print("Ending Script")
