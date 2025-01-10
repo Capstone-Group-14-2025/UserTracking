@@ -223,17 +223,19 @@ class SerialOutput:
         self.ser = serial.Serial(port, baudrate)
         return
 
-    def send_velocities(self, linear_vel, angular_vel):
+    def send_velocities(self, wl, wr):
         """
         Sends the linear and angular velocities over serial as a
-        comma-separated string (e.g. "0.10,3.50").
+        formatted string (e.g., "w_l:0.1 w_r:3.5").
         """
+        
+        
 
-        angular_vel = angular_vel * (3.141592653589793 / 180)  # Convert degrees to radians
-        msg = f"{linear_vel:.3f},{angular_vel:.3f}\n"
+        msg = f"w_l:{wl:.1f} w_r:{wr:.1f}\n"
+
         self.ser.write(msg.encode('utf-8'))
-        print(linear_vel)
-        print(angular_vel)
+        #print("wl:",wl)
+        #print("wr:",wr)
         return
 
     def close(self):
@@ -397,12 +399,31 @@ class DistanceAngleTracker:
                     # Convert to degrees (approx. ±90 degrees)
                     angle_offset_deg = max(min(normalized_offset * 90, 90), -90)
 
+
+
                     # Calculate velocities
-                    linear_vel, angular_vel = self.movement_controller.compute_control(distance, angle_offset_deg)
+                    angle_offset_int = int(angle_offset_deg)
+                    if -10 <= angle_offset_int <= 10:
+                        angle_offset_int = 0
+                    linear_vel, angular_vel = self.movement_controller.compute_control(distance, angle_offset_int)
+                    radius = 0.5
+                    w_hat_l = linear_vel/radius
+                    w_hat_r = w_hat_l
+
+                    wl = angular_vel + w_hat_l
+                    wr = -angular_vel + w_hat_r
+                    #wr = wr * (3.141592653589793 / 180)  # Convert degrees to radians
+                    wr = min(wr, 0.5)
+                    wl = min(wl, 0.5)
+                    wr = max(wr, -0.5)
+                    wl = max(wl, -0.5)
+                    print("Angular Velocity:",angular_vel)
+                    print("Angle Offset:",angle_offset_int)
+                    print("wr:",wr , " " ,"wl:",wl)
 
                     # Send to serial
                     if(self.serial_enabled):
-                        self.serial_output.send_velocities(linear_vel, angular_vel)
+                        self.serial_output.send_velocities(wl, wr)
 
                     # OPTIONAL: Visual feedback
                     if(self.draw_enabled):
@@ -444,6 +465,8 @@ class DistanceAngleTracker:
 # ----------------------------
 if __name__ == "__main__":
 
+    x = 5.5
+    print(x, " test")
     print("Starting Script")
     # Example usage
     tracker = DistanceAngleTracker(
@@ -451,12 +474,12 @@ if __name__ == "__main__":
         target_distance=0.5,        # Desired distance to maintain
         reference_distance=0.5,     # Known distance for calibration
         polling_interval=0.1,       # Interval between processing frames
-        port='/dev/tty.usbserial-022680BC',  # Update with your actual port
+        port='COM4',  # Update with your actual port
         baudrate=9600,
-        serial_enabled=False,
-        draw_enabled=True,
-        kv=1.0,
-        kw=1.0
+        serial_enabled=True,
+        draw_enabled=False,
+        kv=0.7,
+        kw=0.005,
     )
 
     # First, calibrate reference height
