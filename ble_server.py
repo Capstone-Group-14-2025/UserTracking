@@ -7,10 +7,14 @@ import array
 import pyautogui
 from gi.repository import GLib  # Updated import
 import sys
+import os
+import socket
+import threading
 
 from random import randint
 
 mainloop = None
+socket_path = "/tmp/status_socket"
 def enable_advertising():
     try:
         subprocess.run(["bluetoothctl", "power", "on"], check=True)
@@ -278,6 +282,7 @@ class ControlCharacteristic(Characteristic):
                 ['write'],
                 service)
         self.value = []
+        self.process = None
 
     def WriteValue(self, value, options):
         # Decode the incoming byte array to a string
@@ -301,27 +306,42 @@ class ControlCharacteristic(Characteristic):
     def handle_start(self, distance):
         print(f'Start command received with distance {distance}')
         # Optionally, notify the status
-        process = subprocess.Popen(['python', 'poseDetection.py', str(distance)])
-        status_chrc = self.service.get_characteristic_by_uuid(StatusCharacteristic.STATUS_CHRC_UUID)
-        if status_chrc:
-            status_chrc.update_status('Started')
+        self.process = subprocess.Popen(
+            ['python', 'poseDetection1.py', str(distance)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        threading.Thread(target=self.monitor_process, daemon=True).start()
+        # status_chrc = self.service.get_characteristic_by_uuid(StatusCharacteristic.STATUS_CHRC_UUID)
+        # if status_chrc:
+        #     status_chrc.update_status('Started')
 
     def handle_stop(self):
-        print('Stop command received')
+        # print('Stop command received')
         # Optionally, notify the status
         pyautogui.press('q')
-        status_chrc = self.service.get_characteristic_by_uuid(StatusCharacteristic.STATUS_CHRC_UUID)
-        if status_chrc:
-            status_chrc.update_status('Stopped')
+        # status_chrc = self.service.get_characteristic_by_uuid(StatusCharacteristic.STATUS_CHRC_UUID)
+        # if status_chrc:
+        #     status_chrc.update_status('Stopped')
 
     def handle_calibrate(self):
-        print('Calibrate command received')
+        # print('Calibrate command received')
         pyautogui.press('c')
         # Optionally, notify the status
-        status_chrc = self.service.get_characteristic_by_uuid(StatusCharacteristic.STATUS_CHRC_UUID)
-        if status_chrc:
-            status_chrc.update_status('Calibrated')
-
+        # status_chrc = self.service.get_characteristic_by_uuid(StatusCharacteristic.STATUS_CHRC_UUID)
+        # if status_chrc:
+        #     status_chrc.update_status('Calibrated')
+    
+    def monitor_process(self):
+        if self.process:
+            stdout, stderr = self.process.communicate()
+            status_chrc = self.service.get_characteristic_by_uuid(StatusCharacteristic.STATUS_CHRC_UUID)
+            
+            if status_chrc:
+                if self.process.returncode != 0:
+                    error_message = f"Tracking Failed: {stderr.strip() or 'Unknown error'}"
+                    status_chrc.update_status(error_message)
 
 class StatusCharacteristic(Characteristic):
     """
@@ -343,6 +363,7 @@ class StatusCharacteristic(Characteristic):
             return
 
         self.notifying = True
+        threading.Thread(target=self.listen_for_status, daemon=True).start()
         print('Started notifying status changes')
 
     def StopNotify(self):
@@ -352,6 +373,17 @@ class StatusCharacteristic(Characteristic):
 
         self.notifying = False
         print('Stopped notifying status changes')
+    
+    def listen_for_status(self):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server_sock:
+            server_sock.bind(socket_path)
+            server_sock.listen(1)
+            while self.notifying:
+                conn, _ = server_sock.accept()
+                with conn:
+                    status = conn.recv(1024).decode()
+                    if status:
+                        self.update_status(status)
 
     def update_status(self, status):
         if not self.notifying:
@@ -412,6 +444,9 @@ def main():
     if not adapter:
         print('GattManager1 interface not found')
         return
+
+    if os.path.exists(socket_path):
+        os.remove(socket_path)
 
     service_manager = dbus.Interface(
         bus.get_object(BLUEZ_SERVICE_NAME, adapter),

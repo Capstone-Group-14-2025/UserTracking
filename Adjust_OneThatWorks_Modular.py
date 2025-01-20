@@ -1,8 +1,28 @@
 import cv2
 import mediapipe as mp
-import time
 import serial
-#import RPi.GPIO as GPIO  #  ultrasonic sensors lib?
+import sys
+import RPi.GPIO as GPIO
+import time
+import statistics
+import socket
+
+# Constants for GPIO pins
+SENSORS = {
+    "front": {"TRIG": 11, "ECHO": 12},
+    "left": {"TRIG": 13, "ECHO": 16},
+    "right": {"TRIG": 17, "ECHO": 18},
+    "back": {"TRIG": 19, "ECHO": 20},
+}
+BUFFER_SIZE = 5
+MEASUREMENTS = 5
+TIMEOUT = 0.04  # 40ms timeout
+
+# GPIO setup
+GPIO.setmode(GPIO.BCM)
+for sensor in SENSORS.values():
+    GPIO.setup(sensor["TRIG"], GPIO.OUT)
+    GPIO.setup(sensor["ECHO"], GPIO.IN)
 
 class CameraNode:
     """
@@ -58,78 +78,57 @@ class PoseEstimationNode:
         return results
 
 
-class UltrasonicSensors:
-    """
-    Ultrasonic Sensor Node (Disabled by default)
+class UltrasonicSensor:
+    def __init__(self):
+        self.sensors = {name: {"TRIG": config["TRIG"], "ECHO": config["ECHO"]} for name, config in SENSORS.items()}
+        self.distance_buffers = {name: [] for name in SENSORS}
 
-    Placeholder class for four ultrasonic sensors at positions:
-      - Front Left
-      - Front Right
-      - Back Left
-      - Back Right
+    def measure_distance(self, trig_pin, echo_pin):
+        GPIO.output(trig_pin, True)
+        time.sleep(0.00001)  # 10 microseconds
+        GPIO.output(trig_pin, False)
 
-    Currently disabled. To enable:
-      1. Set up GPIO pins.
-      2. Write code to read distance from each sensor.
-      3. Use distances in your control logic as needed.
-    """
+        start_time = time.time()
+        timeout_time = start_time + TIMEOUT
 
-    def __init__(self, enable=False):
-        self.enabled = enable
+        while GPIO.input(echo_pin) == 0:
+            if time.time() > timeout_time:
+                return None
+            start_time = time.time()
 
-        # Placeholder for the GPIO pins
-        self.front_left_pins = (0, 0)   # (TRIG, ECHO)
-        self.front_right_pins = (0, 0)
-        self.back_left_pins = (0, 0)
-        self.back_right_pins = (0, 0)
+        while GPIO.input(echo_pin) == 1:
+            if time.time() > timeout_time:
+                return None
+            stop_time = time.time()
 
-        if self.enabled:
-            # Initialize GPIO
-            #GPIO.setmode(GPIO.BCM)
-                # Example placeholder code; actual pins depend on your wiring:
-                # GPIO.setup(self.front_left_pins[0], GPIO.OUT)
-                # GPIO.setup(self.front_left_pins[1], GPIO.IN)
-            pass
+        time_elapsed = stop_time - start_time
+        distance = (time_elapsed * 34300) / 2
 
-    def read_sensors(self):
-        """
-        Returns a dictionary of distances measured by the ultrasonic sensors.
-        Currently returns dummy values (None or 0) as this is disabled.
-        """
-        if not self.enabled:
-            return {
-                "front_left": None,
-                "front_right": None,
-                "back_left": None,
-                "back_right": None
-            }
+        return distance if 2 <= distance <= 500 else None
 
-        # Actual reading code would go here
-        # e.g.:
-        # front_left_dist = self._read_single_ultrasonic(self.front_left_pins)
-        # ...
-        return {
-            "front_left": 0,
-            "front_right": 0,
-            "back_left": 0,
-            "back_right": 0
-        }
+    def read_distances(self):
+        distances = {}
+        for name, pins in self.sensors.items():
+            current_distances = []
+            for _ in range(MEASUREMENTS):
+                dist = self.measure_distance(pins["TRIG"], pins["ECHO"])
+                if dist is not None:
+                    current_distances.append(dist)
+                time.sleep(0.05)
 
-    def _read_single_ultrasonic(self, pins):
-        """
-        Example private method to read a single ultrasonic sensor.
-        Not implemented in this placeholder. 
-        """
-        pass
+            if current_distances:
+                median_dist = statistics.median(current_distances)
+                self.distance_buffers[name].append(median_dist)
+                if len(self.distance_buffers[name]) > BUFFER_SIZE:
+                    self.distance_buffers[name].pop(0)
+                distances[name] = sum(self.distance_buffers[name]) / len(self.distance_buffers[name])
+            else:
+                distances[name] = None
 
-    """
+        return distances
+
     def cleanup(self):
-
-        #cleans up GPIO if enabled.
-
-        if slef.enabled:
-            GPIO.cleanup()
-    """
+        GPIO.cleanup()
 
 class DistanceCalculator:
     """
@@ -286,10 +285,18 @@ class DistanceAngleTracker:
             print("Initializing Serial Node")
             self.serial_output = SerialOutput(port=port, baudrate=baudrate)
         print("Initializing Ultrasonic Node")
-        self.ultrasonic_node = UltrasonicSensors(enable=False)  # Disabled for now
+        self.ultrasonic_sensor = UltrasonicSensor()
 
         # For visualization / debugging
         self.window_name = "Distance & Angle Tracker"
+    
+    def signal_status(self, status):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            try:
+                sock.connect("/tmp/status_socket")
+                sock.sendall(status.encode())
+            except FileNotFoundError:
+                print("Socket not available")
 
     def calibrate_reference(self):
         """
@@ -297,7 +304,7 @@ class DistanceAngleTracker:
         Press 'q' to exit early.
         """
         print("Stand at the known distance and press 'c' to calibrate reference height (or 'q' to quit).")
-
+        sentStatus = False
         while True:
             frame = self.camera_node.get_frame()
             if frame is None:
@@ -330,12 +337,17 @@ class DistanceAngleTracker:
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
                 cv2.imshow("Calibrate Reference Distance", frame)
-
+                if not sentStatus:
+                    self.signal_status("Callibration Started")
+                    sentStatus = True
+                
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('c'):
                     self.distance_calculator.calibrate(vertical_height)
+                    self.signal_status("Callibration Complete")
                     break
                 if key == ord('q'):
+                    self.signal_status("Callibration Stopped")
                     break
             else:
                 cv2.imshow("Calibrate Reference Distance", frame)
@@ -350,17 +362,24 @@ class DistanceAngleTracker:
         computes velocities, and sends them over serial.
         Press 'q' to quit.
         """
+        sentStatus = False
         while True:
             frame = self.camera_node.get_frame()
             if frame is None:
                 print("[ERROR] Could not read frame.")
                 break
 
+            distances = self.ultrasonic_sensor.read_distances()
+            print("Ultrasonic distances:", distances)
+
             # Check user input at any time
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
+                self.signal_status("Tracking Stopped")
+                self.serial_output.send_velocities(0, 0)
                 break
             elif key == ord('c'):
+                self.signal_status("Callibration")
                 self.calibrate_reference()
 
             current_time = time.time()
@@ -370,9 +389,9 @@ class DistanceAngleTracker:
                 frame_height, frame_width = frame.shape[:2]
                 results = self.pose_node.process_frame(frame)
 
-                # Read ultrasonic data (unused in control for now)
-                sensor_data = self.ultrasonic_node.read_sensors()
-                # print(sensor_data)  # For debugging if needed
+                if not sentStatus:
+                    self.signal_status("Tracking Started")
+                    sentStatus = True
 
                 if results.pose_landmarks:
                     landmarks = results.pose_landmarks.landmark
@@ -438,7 +457,7 @@ class DistanceAngleTracker:
         # Cleanup
         self.camera_node.release()
         self.serial_output.close()
-        self.ultrasonic_node.cleanup()
+        self.ultrasonic_sensor.cleanup()
         cv2.destroyAllWindows()
 
     def _draw_info(self, frame, distance, linear_vel, angular_vel, angle_offset_deg, user_center_x, user_center_y):
@@ -464,21 +483,24 @@ class DistanceAngleTracker:
 #             MAIN
 # ----------------------------
 if __name__ == "__main__":
+    args = sys.argv
+    distance = float(args[1])
 
-    x = 5.5
-    print(x, " test")
-    print("Starting Script")
-    # Example usage
+    #check distance
+    checkDistance = distance > 0 and distance < 2
+    if not checkDistance:
+        distance = 0.5
+        
     tracker = DistanceAngleTracker(
         camera_index=0,
         target_distance=0.5,        # Desired distance to maintain
-        reference_distance=0.5,     # Known distance for calibration
+        reference_distance=distance,     # Known distance for calibration
         polling_interval=0.1,       # Interval between processing frames
-        port='COM4',  # Update with your actual port
+        port='/dev/ttyUSB0',  # Update with your actual port
         baudrate=9600,
-        serial_enabled=True,
+        serial_enabled=False,
         draw_enabled=False,
-        kv=0.7,
+        kv=0.8,
         kw=0.005,
     )
 
