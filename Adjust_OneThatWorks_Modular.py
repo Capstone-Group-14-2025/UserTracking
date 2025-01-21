@@ -338,16 +338,16 @@ class DistanceAngleTracker:
 
                 cv2.imshow("Calibrate Reference Distance", frame)
                 if not sentStatus:
-                    self.signal_status("Callibration Started")
+                    self.signal_status("Calibration Started")
                     sentStatus = True
                 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('c'):
                     self.distance_calculator.calibrate(vertical_height)
-                    self.signal_status("Callibration Complete")
+                    self.start_tracking()
                     break
                 if key == ord('q'):
-                    self.signal_status("Callibration Stopped")
+                    self.signal_status("Calibration Stopped")
                     break
             else:
                 cv2.imshow("Calibrate Reference Distance", frame)
@@ -376,10 +376,11 @@ class DistanceAngleTracker:
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 self.signal_status("Tracking Stopped")
-                self.serial_output.send_velocities(0, 0)
+                if(self.serial_enabled):
+                    self.serial_output.send_velocities(0, 0)
                 break
             elif key == ord('c'):
-                self.signal_status("Callibration")
+                self.signal_status("Calibration")
                 self.calibrate_reference()
 
             current_time = time.time()
@@ -456,9 +457,10 @@ class DistanceAngleTracker:
 
         # Cleanup
         self.camera_node.release()
-        self.serial_output.close()
+        if(self.serial_enabled):
+            self.serial_output.close()
         self.ultrasonic_sensor.cleanup()
-        cv2.destroyAllWindows()
+        #cv2.destroyAllWindows()
 
     def _draw_info(self, frame, distance, linear_vel, angular_vel, angle_offset_deg, user_center_x, user_center_y):
         """
@@ -490,7 +492,7 @@ if __name__ == "__main__":
     checkDistance = distance > 0 and distance < 2
     if not checkDistance:
         distance = 0.5
-        
+    
     tracker = DistanceAngleTracker(
         camera_index=0,
         target_distance=0.5,        # Desired distance to maintain
@@ -506,8 +508,5 @@ if __name__ == "__main__":
 
     # First, calibrate reference height
     tracker.calibrate_reference()
-
-    # Start the main tracking loop
-    tracker.start_tracking()
 
     print("Ending Script")

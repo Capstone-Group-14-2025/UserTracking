@@ -308,7 +308,6 @@ class ControlCharacteristic(Characteristic):
         # Optionally, notify the status
         self.process = subprocess.Popen(
             ['python', 'poseDetection1.py', str(distance)],
-            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True
         )
@@ -337,7 +336,6 @@ class ControlCharacteristic(Characteristic):
         if self.process:
             stdout, stderr = self.process.communicate()
             status_chrc = self.service.get_characteristic_by_uuid(StatusCharacteristic.STATUS_CHRC_UUID)
-            
             if status_chrc:
                 if self.process.returncode != 0:
                     error_message = f"Tracking Failed: {stderr.strip() or 'Unknown error'}"
