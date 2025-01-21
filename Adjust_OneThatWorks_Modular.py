@@ -24,6 +24,112 @@ for sensor in SENSORS.values():
     GPIO.setup(sensor["TRIG"], GPIO.OUT)
     GPIO.setup(sensor["ECHO"], GPIO.IN)
 
+# ---------------------------------------------------
+#             SIFT-BASED FEATURE TRACKER
+# ---------------------------------------------------
+class FeatureBasedTracker:
+    def __init__(self):
+        # Create SIFT and FLANN
+        self.sift = cv2.SIFT_create()
+        FLANN_INDEX_KDTREE = 1
+        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+        search_params = dict(checks=50)
+        self.flann = cv2.FlannBasedMatcher(index_params, search_params)
+
+        # Internals
+        self.object_descriptors = None
+        self.background_descriptors = None
+        self.prev_bbox = None
+        self.initialized = False
+
+    def initialize_tracking(self, frame, bbox):
+        """
+        Initialize the SIFT-based tracker with an ROI specified by bbox.
+        bbox = (x, y, w, h)
+        """
+        self.prev_bbox = bbox
+
+        x, y, w, h = bbox
+        # Detect keypoints in entire frame
+        keypoints, descriptors = self.sift.detectAndCompute(frame, None)
+        if descriptors is None:
+            return
+
+        object_keypoints = []
+        object_descriptors = []
+        background_keypoints = []
+        background_descriptors = []
+
+        for kp, desc in zip(keypoints, descriptors):
+            if (x <= kp.pt[0] <= x + w) and (y <= kp.pt[1] <= y + h):
+                object_keypoints.append(kp)
+                object_descriptors.append(desc)
+            else:
+                background_keypoints.append(kp)
+                background_descriptors.append(desc)
+
+        if len(object_descriptors) > 0:
+            self.object_descriptors = np.array(object_descriptors, dtype=np.float32)
+        else:
+            self.object_descriptors = None
+        if len(background_descriptors) > 0:
+            self.background_descriptors = np.array(background_descriptors, dtype=np.float32)
+        else:
+            self.background_descriptors = None
+
+        self.initialized = True
+
+    def track_object(self, frame):
+        """
+        Uses SIFT matching + FLANN to update the bounding box.
+        Returns the new_bbox (x, y, w, h) or None if tracking fails.
+        """
+        if (not self.initialized or
+            self.object_descriptors is None or
+            self.background_descriptors is None):
+            return None
+
+        keypoints, descriptors = self.sift.detectAndCompute(frame, None)
+        if descriptors is None or len(keypoints) == 0:
+            return None
+
+        # KNN match to object and background
+        try:
+            object_matches = self.flann.knnMatch(descriptors, self.object_descriptors, k=2)
+            background_matches = self.flann.knnMatch(descriptors, self.background_descriptors, k=2)
+        except:
+            return None
+
+        object_points = []
+        for i, kp in enumerate(keypoints):
+            if i < len(object_matches) and len(object_matches[i]) == 2:
+                # Best match distance for object
+                d_o1 = object_matches[i][0].distance
+                # For background
+                if i < len(background_matches) and len(background_matches[i]) > 0:
+                    d_b1 = background_matches[i][0].distance
+                else:
+                    d_b1 = float('inf')
+
+                if d_b1 == 0:  # avoid division by zero
+                    continue
+
+                ratio = d_o1 / d_b1
+                if ratio < 0.5:  # accept match
+                    object_points.append(kp.pt)
+
+        if len(object_points) == 0:
+            return None
+
+        # Use min/max to define bounding box
+        points = np.array(object_points)
+        x_min, y_min = np.min(points, axis=0)
+        x_max, y_max = np.max(points, axis=0)
+
+        new_bbox = (int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min))
+        self.prev_bbox = new_bbox
+        return new_bbox
+
 class CameraNode:
     """
     Camera Input Node
@@ -227,9 +333,6 @@ class SerialOutput:
         Sends the linear and angular velocities over serial as a
         formatted string (e.g., "w_l:0.1 w_r:3.5").
         """
-        
-        
-
         msg = f"w_l:{wl:.1f} w_r:{wr:.1f}\n"
 
         self.ser.write(msg.encode('utf-8'))
@@ -286,7 +389,9 @@ class DistanceAngleTracker:
             self.serial_output = SerialOutput(port=port, baudrate=baudrate)
         print("Initializing Ultrasonic Node")
         self.ultrasonic_sensor = UltrasonicSensor()
-
+        print("Initializing Feature-Based Tracker")
+        self.feature_tracker = FeatureBasedTracker()
+        self.sift_bbox = None  # We'll store the current bounding box from SIFT
         # For visualization / debugging
         self.window_name = "Distance & Angle Tracker"
     
@@ -390,11 +495,21 @@ class DistanceAngleTracker:
                 frame_height, frame_width = frame.shape[:2]
                 results = self.pose_node.process_frame(frame)
 
+                # Default values if no Pose is detected
+                distance = 0
+                linear_vel = 0
+                angular_vel = 0
+                angle_offset_deg = 0
+                user_center_x = frame_width / 2
+                user_center_y = frame_height / 2
+                pose_detected = False
+
                 if not sentStatus:
                     self.signal_status("Tracking Started")
                     sentStatus = True
 
                 if results.pose_landmarks:
+                    pose_detected = True
                     landmarks = results.pose_landmarks.landmark
                     # Shoulders
                     left_shoulder = landmarks[mp.solutions.pose.PoseLandmark.LEFT_SHOULDER]
@@ -444,14 +559,57 @@ class DistanceAngleTracker:
                     # Send to serial
                     if(self.serial_enabled):
                         self.serial_output.send_velocities(wl, wr)
+                    
+                    # --- SIFT bounding box update ---
+                    # Define a bounding box around shoulders & hips
+                    all_x = [
+                        left_shoulder.x * frame_width,
+                        right_shoulder.x * frame_width,
+                        left_hip.x * frame_width,
+                        right_hip.x * frame_width
+                    ]
+                    all_y = [
+                        left_shoulder.y * frame_height,
+                        right_shoulder.y * frame_height,
+                        left_hip.y * frame_height,
+                        right_hip.y * frame_height
+                    ]
+                    x_min, x_max = int(min(all_x)), int(max(all_x))
+                    y_min, y_max = int(min(all_y)), int(max(all_y))
+                    w = x_max - x_min
+                    h = y_max - y_min
 
-                    # OPTIONAL: Visual feedback
-                    if(self.draw_enabled):
-                        self._draw_info(frame, distance, linear_vel, angular_vel, angle_offset_deg, user_center_x, shoulder_y)
+                    # Initialize or re-initialize tracker
+                    if not self.feature_tracker.initialized:
+                        self.feature_tracker.initialize_tracking(frame, (x_min, y_min, w, h))
+                    else:
+                        # Simple approach: re-init each time
+                        self.feature_tracker.initialize_tracking(frame, (x_min, y_min, w, h))
+
+                    self.sift_bbox = (x_min, y_min, w, h)
+
                 else:
-                    # If pose not detected
-                    cv2.putText(frame, "No Pose Detected", (10, 20), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                    # --- If Mediapipe fails, fallback to feature-based tracking ---
+                    new_bbox = self.feature_tracker.track_object(frame)
+                    if new_bbox is not None:
+                        self.sift_bbox = new_bbox
+                    else:
+                        cv2.putText(frame, "Tracking lost!", (50, 80),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 255), 2)
+
+                # --- Finally, draw info if enabled ---
+                if self.draw_enabled:
+                    self._draw_info(
+                        frame=frame,
+                        distance=distance,
+                        linear_vel=linear_vel,
+                        angular_vel=angular_vel,
+                        angle_offset_deg=angle_offset_deg,
+                        user_center_x=user_center_x,
+                        user_center_y=user_center_y,
+                        bbox=self.sift_bbox,
+                        pose_detected=pose_detected
+                    )
 
             cv2.imshow(self.window_name, frame)
 
@@ -460,15 +618,22 @@ class DistanceAngleTracker:
         if(self.serial_enabled):
             self.serial_output.close()
         self.ultrasonic_sensor.cleanup()
-        #cv2.destroyAllWindows()
+        cv2.destroyAllWindows()
 
-    def _draw_info(self, frame, distance, linear_vel, angular_vel, angle_offset_deg, user_center_x, user_center_y):
+    def _draw_info(self, frame, distance, linear_vel, angular_vel, angle_offset_deg,
+                   user_center_x, user_center_y, bbox=None, pose_detected=False):
         """
-        Helper method for drawing text overlays on the frame to
-        display debugging info: distance, velocities, offsets, etc.
+        Draws:
+          - textual info (distance, velocities, etc.)
+          - the bounding box from SIFT, if available
+          - a "torso line" if pose_detected is True
+            (We'll just demonstrate a short line near the user_center for now,
+             or you can draw the actual shoulders-hips line in the main code.)
         """
         text_color = (0, 255, 255)
         font_scale = 0.5
+
+        # 1) Text overlays
         cv2.putText(frame, f"Distance: {distance if distance else 0:.2f} m",
                     (10, 20), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 1)
         cv2.putText(frame, f"Linear Vel: {linear_vel:.2f}",
@@ -477,8 +642,20 @@ class DistanceAngleTracker:
                     (10, 50), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 1)
         cv2.putText(frame, f"Angle Offset: {angle_offset_deg:.2f} deg",
                     (10, 65), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 1)
-        cv2.putText(frame, f"User Pos: ({int(user_center_x)}, {int(user_center_y)})",
+        cv2.putText(frame, f"User Ctr: ({int(user_center_x)}, {int(user_center_y)})",
                     (10, 80), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 1)
+
+        # 2) Draw bounding box if we have one
+        if bbox is not None:
+            (bx, by, bw, bh) = bbox
+            cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (255, 0, 0), 2)
+
+        # 3) If Pose is detected, optionally draw a small line to show "torso"
+        if pose_detected:
+            # Just an example line near user_center_y
+            cx = int(user_center_x)
+            cy = int(user_center_y)
+            cv2.line(frame, (cx, cy - 10), (cx, cy + 10), (0, 255, 0), 2)
 
 
 # ----------------------------
@@ -486,22 +663,23 @@ class DistanceAngleTracker:
 # ----------------------------
 if __name__ == "__main__":
     args = sys.argv
-    distance = float(args[1])
+    if len(args) > 1:
+        distance_arg = float(args[1])
+    else:
+        distance_arg = 0.5
 
-    #check distance
-    checkDistance = distance > 0 and distance < 2
-    if not checkDistance:
-        distance = 0.5
-    
+    if not (0 < distance_arg < 2):
+        distance_arg = 0.5
+
     tracker = DistanceAngleTracker(
         camera_index=0,
-        target_distance=0.5,        # Desired distance to maintain
-        reference_distance=distance,     # Known distance for calibration
-        polling_interval=0.1,       # Interval between processing frames
-        port='/dev/ttyUSB0',  # Update with your actual port
+        target_distance=0.5,         # Desired distance to maintain
+        reference_distance=distance_arg,  # Known distance for calibration
+        polling_interval=0.1,
+        port='/dev/ttyUSB0',
         baudrate=9600,
         serial_enabled=False,
-        draw_enabled=False,
+        draw_enabled=True,
         kv=0.8,
         kw=0.005,
     )
