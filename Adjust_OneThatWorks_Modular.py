@@ -411,6 +411,7 @@ class DistanceAngleTracker:
         """
         print("Stand at the known distance and press 'c' to calibrate reference height (or 'q' to quit).")
         sentStatus = False
+        
         while True:
             frame = self.camera_node.get_frame()
             if frame is None:
@@ -469,6 +470,8 @@ class DistanceAngleTracker:
         Press 'q' to quit.
         """
         sentStatus = False
+        skip_polling_check = False
+        previous_angle_offset_int = 0
         while True:
             frame = self.camera_node.get_frame()
             if frame is None:
@@ -476,21 +479,27 @@ class DistanceAngleTracker:
                 break
 
             distances = self.ultrasonic_sensor.read_distances()
-            print("Ultrasonic distances:", distances)
+            print("Ultrasonic distances:", distances) # CM is measurement
+            if any(distance is not None and distance < 30 for distance in distances.values()):
+                print("YOU ARE TOO CLOSE")
+                if(self.serial_enabled):
+                    self.serial_output.send_velocities(0, 0)
 
             # Check user input at any time
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 self.signal_status("Tracking Stopped")
+                skip_polling_check = True
                 if(self.serial_enabled):
                     self.serial_output.send_velocities(0, 0)
+                    
                 break
             elif key == ord('c'):
                 self.signal_status("Calibration")
                 self.calibrate_reference()
 
             current_time = time.time()
-            if (current_time - self.last_poll_time) >= self.polling_interval:
+            if not skip_polling_check and (current_time - self.last_poll_time) >= self.polling_interval:
                 self.last_poll_time = current_time
 
                 frame_height, frame_width = frame.shape[:2]
@@ -537,20 +546,26 @@ class DistanceAngleTracker:
 
                     # Calculate velocities
                     angle_offset_int = int(angle_offset_deg)
+                    if(not abs(angle_offset_int - previous_angle_offset_int) <= 10):
+                        angle_offset_int =  previous_angle_offset_int
+                    else:
+                        previous_angle_offset_int = angle_offset_int
+
                     if -5 <= angle_offset_int <= 5:
                         angle_offset_int = 0
+
                     linear_vel, angular_vel = self.movement_controller.compute_control(distance, angle_offset_int)
                     radius = 0.5
                     w_hat_l = linear_vel/radius
                     w_hat_r = w_hat_l
 
-                    wr = angular_vel + w_hat_l
-                    wl = -angular_vel + w_hat_r
+                    wl = angular_vel + w_hat_l
+                    wr = -angular_vel + w_hat_r
                     #wr = wr * (3.141592653589793 / 180)  # Convert degrees to radians
-                    wr = min(wr, 0.2)
-                    wl = min(wl, 0.2)
-                    wr = max(wr, -0.2)
-                    wl = max(wl, -0.2)
+                    wr = min(wr, 0.15)
+                    wl = min(wl, 0.15)
+                    wr = max(wr, -0.15)
+                    wl = max(wl, -0.15)
                     print("Angular Velocity:",angular_vel)
                     print("Angle Offset:",angle_offset_int)
                     print("wr:",wr , " " ,"wl:",wl)
@@ -595,6 +610,8 @@ class DistanceAngleTracker:
                     else:
                         cv2.putText(frame, "Tracking lost!", (50, 80),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 255), 2)
+                        if(self.serial_enabled):
+                            self.serial_output.send_velocities(0, 0)
 
                 # --- Finally, draw info if enabled ---
                 if self.draw_enabled:
@@ -609,8 +626,8 @@ class DistanceAngleTracker:
                         bbox=self.sift_bbox,
                         pose_detected=pose_detected
                     )
-
-            #cv2.imshow(self.window_name, frame)
+            if self.draw_enabled:
+                cv2.imshow(self.window_name, frame)
 
         # Cleanup
         self.camera_node.release()
@@ -677,8 +694,8 @@ if __name__ == "__main__":
         polling_interval=0,
         port='/dev/ttyUSB0',
         baudrate=9600,
-        serial_enabled=True,
-        draw_enabled=False,
+        serial_enabled=False,
+        draw_enabled=True,
         kv=0.7,
         kw=0.01,
     )
