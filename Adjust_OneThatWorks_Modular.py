@@ -6,13 +6,15 @@ import RPi.GPIO as GPIO
 import time
 import statistics
 import socket
+import numpy as np
+import threading
 
 # Constants for GPIO pins
 SENSORS = {
     "front": {"TRIG": 11, "ECHO": 12},
     "left": {"TRIG": 13, "ECHO": 16},
-    "right": {"TRIG": 17, "ECHO": 18},
-    "back": {"TRIG": 19, "ECHO": 20},
+    # "right": {"TRIG": 17, "ECHO": 18},
+    # "back": {"TRIG": 19, "ECHO": 20},
 }
 BUFFER_SIZE = 5
 MEASUREMENTS = 5
@@ -188,6 +190,8 @@ class UltrasonicSensor:
     def __init__(self):
         self.sensors = {name: {"TRIG": config["TRIG"], "ECHO": config["ECHO"]} for name, config in SENSORS.items()}
         self.distance_buffers = {name: [] for name in SENSORS}
+        self.cached_distances = {name: None for name in SENSORS}
+        self.lock = threading.Lock()
 
     def measure_distance(self, trig_pin, echo_pin):
         GPIO.output(trig_pin, True)
@@ -212,26 +216,23 @@ class UltrasonicSensor:
 
         return distance if 2 <= distance <= 500 else None
 
+    def async_measure(self, name, trig_pin, echo_pin):
+        dist = self.measure_distance(trig_pin, echo_pin)
+        if dist is not None:
+            with self.lock:
+                self.cached_distances[name] = dist
+
     def read_distances(self):
-        distances = {}
+        threads = []
         for name, pins in self.sensors.items():
-            current_distances = []
-            for _ in range(MEASUREMENTS):
-                dist = self.measure_distance(pins["TRIG"], pins["ECHO"])
-                if dist is not None:
-                    current_distances.append(dist)
-                time.sleep(0.05)
+            thread = threading.Thread(target=self.async_measure, args=(name, pins['TRIG'], pins['ECHO']))
+            threads.append(thread)
+            thread.start()
 
-            if current_distances:
-                median_dist = statistics.median(current_distances)
-                self.distance_buffers[name].append(median_dist)
-                if len(self.distance_buffers[name]) > BUFFER_SIZE:
-                    self.distance_buffers[name].pop(0)
-                distances[name] = sum(self.distance_buffers[name]) / len(self.distance_buffers[name])
-            else:
-                distances[name] = None
+        for thread in threads:
+            thread.join()
 
-        return distances
+        return self.cached_distances
 
     def cleanup(self):
         GPIO.cleanup()
@@ -532,26 +533,24 @@ class DistanceAngleTracker:
                     # Normalize offset in range [-1, 1]
                     normalized_offset = horizontal_offset / (frame_width / 2)
                     # Convert to degrees (approx. ±90 degrees)
-                    angle_offset_deg = max(min(normalized_offset * 90, 90), -90)
-
-
+                    angle_offset_deg = max(min(normalized_offset * 90, 90), 0)
 
                     # Calculate velocities
                     angle_offset_int = int(angle_offset_deg)
-                    if -10 <= angle_offset_int <= 10:
+                    if -5 <= angle_offset_int <= 5:
                         angle_offset_int = 0
                     linear_vel, angular_vel = self.movement_controller.compute_control(distance, angle_offset_int)
                     radius = 0.5
                     w_hat_l = linear_vel/radius
                     w_hat_r = w_hat_l
 
-                    wl = angular_vel + w_hat_l
-                    wr = -angular_vel + w_hat_r
+                    wr = angular_vel + w_hat_l
+                    wl = -angular_vel + w_hat_r
                     #wr = wr * (3.141592653589793 / 180)  # Convert degrees to radians
-                    wr = min(wr, 0.5)
-                    wl = min(wl, 0.5)
-                    wr = max(wr, -0.5)
-                    wl = max(wl, -0.5)
+                    wr = min(wr, 0.2)
+                    wl = min(wl, 0.2)
+                    wr = max(wr, -0.2)
+                    wl = max(wl, -0.2)
                     print("Angular Velocity:",angular_vel)
                     print("Angle Offset:",angle_offset_int)
                     print("wr:",wr , " " ,"wl:",wl)
@@ -611,14 +610,14 @@ class DistanceAngleTracker:
                         pose_detected=pose_detected
                     )
 
-            cv2.imshow(self.window_name, frame)
+            #cv2.imshow(self.window_name, frame)
 
         # Cleanup
         self.camera_node.release()
         if(self.serial_enabled):
             self.serial_output.close()
         self.ultrasonic_sensor.cleanup()
-        cv2.destroyAllWindows()
+        #cv2.destroyAllWindows()
 
     def _draw_info(self, frame, distance, linear_vel, angular_vel, angle_offset_deg,
                    user_center_x, user_center_y, bbox=None, pose_detected=False):
@@ -668,20 +667,20 @@ if __name__ == "__main__":
     else:
         distance_arg = 0.5
 
-    if not (0 < distance_arg < 2):
+    if not (0 < distance_arg < 1):
         distance_arg = 0.5
 
     tracker = DistanceAngleTracker(
         camera_index=0,
         target_distance=0.5,         # Desired distance to maintain
-        reference_distance=distance_arg,  # Known distance for calibration
-        polling_interval=0.1,
+        reference_distance=0.5,  # Known distance for calibration
+        polling_interval=0,
         port='/dev/ttyUSB0',
         baudrate=9600,
-        serial_enabled=False,
-        draw_enabled=True,
-        kv=0.8,
-        kw=0.005,
+        serial_enabled=True,
+        draw_enabled=False,
+        kv=0.7,
+        kw=0.01,
     )
 
     # First, calibrate reference height
