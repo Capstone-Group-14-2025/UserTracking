@@ -479,11 +479,11 @@ class DistanceAngleTracker:
                 break
 
             distances = self.ultrasonic_sensor.read_distances()
-            print("Ultrasonic distances:", distances) # CM is measurement
-            if any(distance is not None and distance < 30 for distance in distances.values()):
-                print("YOU ARE TOO CLOSE")
-                if(self.serial_enabled):
-                    self.serial_output.send_velocities(0, 0)
+            #print("Ultrasonic distances:", distances) # CM is measurement
+            #if any(distance is not None and distance < 30 for distance in distances.values()):
+            #    print("YOU ARE TOO CLOSE")
+            #    if(self.serial_enabled):
+            #        self.serial_output.send_velocities(0, 0)
 
             # Check user input at any time
             key = cv2.waitKey(1) & 0xFF
@@ -542,17 +542,17 @@ class DistanceAngleTracker:
                     # Normalize offset in range [-1, 1]
                     normalized_offset = horizontal_offset / (frame_width / 2)
                     # Convert to degrees (approx. ±90 degrees)
-                    angle_offset_deg = max(min(normalized_offset * 90, 90), 0)
+                    angle_offset_deg = max(min(normalized_offset * 90, 90), -90)
+
+                    print("actual angle:",angle_offset_deg)
 
                     # Calculate velocities
                     angle_offset_int = int(angle_offset_deg)
-                    if(not abs(angle_offset_int - previous_angle_offset_int) <= 10):
+                    if(abs(angle_offset_int - previous_angle_offset_int) <= 2.5):
                         angle_offset_int =  previous_angle_offset_int
                     else:
                         previous_angle_offset_int = angle_offset_int
 
-                    if -5 <= angle_offset_int <= 5:
-                        angle_offset_int = 0
 
                     linear_vel, angular_vel = self.movement_controller.compute_control(distance, angle_offset_int)
                     radius = 0.5
@@ -562,10 +562,10 @@ class DistanceAngleTracker:
                     wl = angular_vel + w_hat_l
                     wr = -angular_vel + w_hat_r
                     #wr = wr * (3.141592653589793 / 180)  # Convert degrees to radians
-                    wr = min(wr, 0.15)
-                    wl = min(wl, 0.15)
-                    wr = max(wr, -0.15)
-                    wl = max(wl, -0.15)
+                    wr = min(wr, 0.125)
+                    wl = min(wl, 0.125)
+                    wr = max(wr, -0.125)
+                    wl = max(wl, -0.125)
                     print("Angular Velocity:",angular_vel)
                     print("Angle Offset:",angle_offset_int)
                     print("wr:",wr , " " ,"wl:",wl)
@@ -694,13 +694,13 @@ if __name__ == "__main__":
         polling_interval=0,
         port='/dev/ttyUSB0',
         baudrate=9600,
-        serial_enabled=False,
+        serial_enabled=True,
         draw_enabled=True,
-        kv=0.7,
-        kw=0.01,
+        kv=0.8,
+        kw=0.005,
     )
 
-    # First, calibrate reference height
+    # First, calibrate reference heightq
     tracker.calibrate_reference()
 
     print("Ending Script")
