@@ -553,6 +553,9 @@ class DistanceAngleTracker:
                     else:
                         previous_angle_offset_int = angle_offset_int
 
+                    if -10 <= angle_offset_int <= 10:
+                        angle_offset_int = 0
+
 
                     linear_vel, angular_vel = self.movement_controller.compute_control(distance, angle_offset_int)
                     radius = 0.5
@@ -562,10 +565,10 @@ class DistanceAngleTracker:
                     wl = angular_vel + w_hat_l
                     wr = -angular_vel + w_hat_r
                     #wr = wr * (3.141592653589793 / 180)  # Convert degrees to radians
-                    wr = min(wr, 0.125)
-                    wl = min(wl, 0.125)
-                    wr = max(wr, -0.125)
-                    wl = max(wl, -0.125)
+                    wr = min(wr, 0.1)
+                    wl = min(wl, 0.1)
+                    wr = max(wr, -0.1)
+                    wl = max(wl, -0.1)
                     print("Angular Velocity:",angular_vel)
                     print("Angle Offset:",angle_offset_int)
                     print("wr:",wr , " " ,"wl:",wl)
@@ -695,9 +698,9 @@ if __name__ == "__main__":
         port='/dev/ttyUSB0',
         baudrate=9600,
         serial_enabled=True,
-        draw_enabled=True,
-        kv=0.8,
-        kw=0.005,
+        draw_enabled=False,
+        kv=0.27,
+        kw=0.00055,
     )
 
     # First, calibrate reference heightq
