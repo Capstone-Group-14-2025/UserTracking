@@ -13,3 +13,7 @@
 6. you will get two ip addresses as such: 192.168.0.3 140.193.235.72 
 7. you will notice one of them is not  192.168.0.3
 8. Exit the ssh session; and ssh into the other ip address instead as such: ssh comrade@140.193.235.72 
+
+## More notes
+- To run the poseDetection1.py program you have to use the virtual envioronment using source ~/mediapipe_project/mp_env/bin/activate
+  
