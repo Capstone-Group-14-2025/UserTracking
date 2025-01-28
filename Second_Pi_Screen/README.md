@@ -16,4 +16,5 @@
 
 ## More notes
 - To run the poseDetection1.py program you have to use the virtual envioronment using source ~/mediapipe_project/mp_env/bin/activate
+- To run without being on the VNC use export DISPLAY=:0 in the terminal on your computer 
   
