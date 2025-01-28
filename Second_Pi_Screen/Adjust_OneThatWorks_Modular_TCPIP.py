@@ -12,7 +12,7 @@ import threading
 # ---------------------------------------------------
 #                   TCP CLIENT
 # ---------------------------------------------------
-def send_command_tcp(command, host="192.168.1.100", port=12345):
+def send_command_tcp(command, host="0.0.0.0", port=12345):
     """
     Connects to the LCD_pi server at (host, port),
     sends the specified command as a single line,
@@ -417,7 +417,7 @@ class DistanceAngleTracker:
                  draw_enabled = False,
                  kv=1.0,
                  kw=1.0,
-                 LCD_pi_host="192.168.1.100",
+                 LCD_pi_host="0.0.0.0",
                  LCD_pi_port=12345):
         # Interval for processing
         self.draw_enabled = draw_enabled
@@ -774,11 +774,11 @@ if __name__ == "__main__":
         polling_interval=0,
         port='/dev/ttyUSB0',
         baudrate=9600,
-        serial_enabled=True,
+        serial_enabled=False,
         draw_enabled=False,
         kv=0.27,
         kw=0.00055,
-        LCD_pi_host="192.168.1.100",  # <-- IP of the LCD_pi Pi
+        LCD_pi_host="140.193.235.72",  # <-- IP of the LCD_pi Pi
         LCD_pi_port=12345
     )
 
