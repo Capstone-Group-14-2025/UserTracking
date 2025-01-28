@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 
 import sys
-import select
 import tkinter as tk
 import random
 import math
+import threading
+import queue  # For thread-safe queues
 
 # Directions
 DIRECTION_STRAIGHT = "straight"
@@ -23,46 +24,95 @@ DIRECTION_OFFSETS = {
 # We'll interpret each emotion as a single "base color" for the outer eye shape.
 # Then we do a color fade from old to new. Once done, we switch the lens shape.
 EMOTIONS = {
-    "neutral": (0x00, 0x22, 0x55),  # Dark bluish
-    "angry":   (0x60, 0x00, 0x00),  # Dark red
-    "happy":   (0x00, 0x44, 0x00)   # Dark green
+    "neutral": {
+        "outer": "#3399FF",  # Vibrant blue
+        "lens":  "#70CFFF"   # Lighter blue
+    },
+    "angry": {
+        "outer": "#E63737",  # Bright red
+        "lens":  "#FFA3A3"   # Lighter red
+    },
+    "happy": {
+        "outer": "#2CE82C",  # Bright green
+        "lens":  "#CFFFc4"   # Lighter green
+    }
 }
 
+def hex_to_rgb(hex_color):
+    """
+    Convert a hex color string to an (R, G, B) tuple.
+    """
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) != 6:
+        raise ValueError(f"Input #{hex_color} is not in #RRGGBB format.")
+    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
+def rgb_to_hex(rgb_tuple):
+    """
+    Convert an (R, G, B) tuple to a hex color string.
+    """
+    return "#{:02X}{:02X}{:02X}".format(*rgb_tuple)
+
+# Initialize a thread-safe queue for commands
+command_queue = queue.Queue()
+
+def command_input_thread(cmd_queue):
+    """
+    Thread function to read commands from stdin and put them into the queue.
+    """
+    while True:
+        try:
+            # Read a line from stdin
+            line = sys.stdin.readline()
+            if not line:
+                break  # EOF reached
+            line = line.strip().lower()
+            if line:
+                cmd_queue.put(line)
+        except Exception as e:
+            print(f"Error reading stdin: {e}")
+            break
+
+# Start the command input thread
+input_thread = threading.Thread(target=command_input_thread, args=(command_queue,), daemon=True)
+input_thread.start()
 
 class RoboEyesApp:
-    def __init__(self, root, width=600, height=300, fps=30):
+    def __init__(self, root, width, height, fps, cmd_queue):
         self.root = root
         self.root.title("Transitions Demo")
 
         self.width = width
         self.height = height
-        self.canvas = tk.Canvas(self.root, width=self.width, height=self.height, bg="black")
+        # Remove borders and highlight thickness from the canvas
+        self.canvas = tk.Canvas(
+            self.root, 
+            width=self.width, 
+            height=self.height, 
+            bg="black",
+            highlightthickness=0,  # Remove highlight border
+            bd=0  # Remove border
+        )
         self.canvas.pack()
 
         # Eye geometry
-        self.eye_width = 120
-        self.eye_height = 160
+        self.eye_width = 300
+        self.eye_height = 450
 
         # Eye positions
-        self.left_eye_x = (self.width // 2) - (self.eye_width + 20)
+        self.left_eye_x = (self.width // 2) - (self.eye_width + 40)
         self.left_eye_y = (self.height // 2) - (self.eye_height // 2)
-        self.right_eye_x = (self.width // 2) + 20
+        self.right_eye_x = (self.width // 2) + 40
         self.right_eye_y = self.left_eye_y
 
         # Current direction is stored as a float offset in [-1..1]
         self.current_dir_offset = 0.0
-        # Target direction offset we want to reach
-        self.target_dir_offset = 0.0
 
-        # Current emotion color as an (R,G,B)
-        self.current_emotion_color = EMOTIONS["neutral"]
-        # Target color we want to fade to
-        self.target_emotion_color = EMOTIONS["neutral"]
-        # The actual "shape" to draw. We'll keep track separately
-        # so that during color fade, we haven't fully switched shapes yet.
+        # Current emotion colors as (R, G, B)
+        self.current_emotion_color = hex_to_rgb(EMOTIONS["neutral"]["outer"])
+        self.current_lens_color = hex_to_rgb(EMOTIONS["neutral"]["lens"])
+        # The actual "shape" to draw
         self.current_emotion = "neutral"
-        # We'll store a "pending_emotion" that we'll switch to once color fade completes
-        self.pending_emotion = "neutral"
 
         # Eye “open/closed” states
         self.left_eye_open = True
@@ -73,25 +123,33 @@ class RoboEyesApp:
         self.fps = fps
         self.frame_interval = int(1000 / self.fps)
 
+        # Command queue
+        self.cmd_queue = cmd_queue
+
         # Kick off the update & blinking loops
         self.update_eyes()
         self.schedule_random_blink()
+        self.process_commands()
 
     # ---------------------
     # Public Setters
     # ---------------------
     def set_direction(self, direction):
-        """Requests a new direction by setting the target offset."""
+        """Immediately set the direction."""
         if direction not in DIRECTION_OFFSETS:
+            print(f"Direction '{direction}' not recognized.")
             return
-        self.target_dir_offset = DIRECTION_OFFSETS[direction]
+        self.current_dir_offset = DIRECTION_OFFSETS[direction]
 
     def set_emotion(self, emotion):
-        """Requests a new emotion by setting the target color; shape will change when fade completes."""
+        """Immediately set the emotion."""
         if emotion not in EMOTIONS:
+            print(f"Emotion '{emotion}' not recognized.")
             return
-        self.target_emotion_color = EMOTIONS[emotion]
-        self.pending_emotion = emotion
+        # Convert hex colors to RGB tuples and set immediately
+        self.current_emotion_color = hex_to_rgb(EMOTIONS[emotion]["outer"])
+        self.current_lens_color = hex_to_rgb(EMOTIONS[emotion]["lens"])
+        self.current_emotion = emotion
 
     def blink(self):
         """Close eyes briefly, then reopen."""
@@ -99,7 +157,7 @@ class RoboEyesApp:
             self.blink_in_progress = True
             self.left_eye_open = False
             self.right_eye_open = False
-            self.root.after(150, self.end_blink)
+            self.root.after(100, self.end_blink)  # Reduced blink duration for faster blink
 
     def end_blink(self):
         self.left_eye_open = True
@@ -110,10 +168,8 @@ class RoboEyesApp:
     # Main Animation Loop
     # ---------------------
     def update_eyes(self):
-        """Update current direction & emotion transitions, then draw everything. Re-scheduled each frame."""
-        self.update_direction_transition()
-        self.update_emotion_transition()
-
+        """Draw eyes based on the current state. Re-scheduled each frame."""
+        
         # Clear the canvas
         self.canvas.delete("all")
 
@@ -125,7 +181,8 @@ class RoboEyesApp:
             h=self.eye_height,
             open_=self.left_eye_open,
             direction_offset=self.current_dir_offset if not self.blink_in_progress else 0.0,
-            emotion_color=self.current_emotion_color,
+            outer_color=self.current_emotion_color,
+            lens_color=self.current_lens_color,
             emotion_shape=self.current_emotion
         )
         self.draw_eye(
@@ -135,87 +192,35 @@ class RoboEyesApp:
             h=self.eye_height,
             open_=self.right_eye_open,
             direction_offset=self.current_dir_offset if not self.blink_in_progress else 0.0,
-            emotion_color=self.current_emotion_color,
+            outer_color=self.current_emotion_color,
+            lens_color=self.current_lens_color,
             emotion_shape=self.current_emotion
         )
 
         self.root.after(self.frame_interval, self.update_eyes)
 
     # ---------------------
-    # Direction Transition
-    # ---------------------
-    def update_direction_transition(self):
-        """
-        Move 'current_dir_offset' slowly toward 'target_dir_offset'.
-        You can adjust the speed by changing 'step'.
-        """
-        step = 0.06  # how quickly we move per frame
-        diff = self.target_dir_offset - self.current_dir_offset
-        if abs(diff) < 0.01:
-            # Close enough, just set it
-            self.current_dir_offset = self.target_dir_offset
-        else:
-            # Move by a small fraction
-            self.current_dir_offset += step * (1 if diff > 0 else -1)
-
-    # ---------------------
-    # Emotion Transition
-    # ---------------------
-    def update_emotion_transition(self):
-        """
-        Fade current_emotion_color to target_emotion_color.
-        Once fully reached, change the 'current_emotion' shape.
-        """
-        # Unpack current and target
-        (r0, g0, b0) = self.current_emotion_color
-        (r1, g1, b1) = self.target_emotion_color
-
-        # Speed: the bigger the step, the faster the color changes
-        fade_step = 6
-
-        # Compute new color each frame
-        new_r = self._approach(r0, r1, fade_step)
-        new_g = self._approach(g0, g1, fade_step)
-        new_b = self._approach(b0, b1, fade_step)
-
-        self.current_emotion_color = (new_r, new_g, new_b)
-
-        # If we've arrived at the target color, switch shapes
-        if (new_r, new_g, new_b) == (r1, g1, b1):
-            self.current_emotion = self.pending_emotion
-
-    def _approach(self, cur, tgt, step):
-        """
-        Helper to move cur -> tgt by up to 'step', clamped so we don't overshoot.
-        """
-        if cur < tgt:
-            return min(cur + step, tgt)
-        elif cur > tgt:
-            return max(cur - step, tgt)
-        else:
-            return cur
-
-    # ---------------------
     # Eye Drawing
     # ---------------------
-    def draw_eye(self, x, y, w, h, open_, direction_offset, emotion_color, emotion_shape):
+    def draw_eye(self, x, y, w, h, open_, direction_offset, outer_color, lens_color, emotion_shape):
         """
         - direction_offset ∈ [-1..1]: shift pupil left or right.
-        - emotion_color: an (R,G,B) tuple for the outer shape color.
+        - outer_color: an (R,G,B) tuple for the outer shape color.
+        - lens_color: an (R,G,B) tuple for the lens color.
         - emotion_shape: which shape to draw inside (angry / happy / neutral).
         """
         # If the eye is closed, drastically shrink the vertical dimension
         if not open_:
             h = max(8, h // 8)
 
-        # Build the color strings (outer/lens).
-        # We'll use the same base color for outer and shift it for the lens.
-        base_color = "#{:02x}{:02x}{:02x}".format(*emotion_color)
+        # Build the color strings
+        outer_color_str = rgb_to_hex(outer_color)
+        lens_color_str = rgb_to_hex(lens_color)
 
         # Outer shape (rounded rect)
         corner_radius = min(w, h) // 5
         self.draw_rounded_rect(x, y, x + w, y + h, corner_radius,
-                               fill=base_color, outline=base_color)
+                               fill=outer_color_str, outline=outer_color_str)
 
         # Lens bounding box
         lens_padding = w // 8
@@ -232,13 +237,6 @@ class RoboEyesApp:
             lens_h = max(4, lens_h // 4)
             lens_y = y + (h // 2) - (lens_h // 2)
 
-        # Now pick lens color, slightly lighter or different from base to show variety.
-        # Just an example shift.
-        lens_r = min(255, emotion_color[0] + 50)
-        lens_g = min(255, emotion_color[1] + 50)
-        lens_b = min(255, emotion_color[2] + 50)
-        lens_color_str = "#{:02x}{:02x}{:02x}".format(lens_r, lens_g, lens_b)
-
         # Draw the lens based on shape
         if emotion_shape == "angry":
             self._draw_angry_lens(lens_x, lens_y, lens_w, lens_h, lens_color_str)
@@ -249,7 +247,7 @@ class RoboEyesApp:
             self._draw_neutral_lens(lens_x, lens_y, lens_w, lens_h, lens_color_str)
 
     def _draw_angry_lens(self, lx, ly, lw, lh, color):
-        # spiky polygon
+        # Spiky polygon
         lens_points = [
             (lx,        ly),
             (lx + lw,   ly),
@@ -257,11 +255,13 @@ class RoboEyesApp:
             (lx,        ly + lh),
             (lx + lw//2,ly + lh//2)
         ]
-        self.canvas.create_polygon(*lens_points, fill=color, outline=color)
-        self.draw_polygon_flicker(lens_points)
+        # Flatten the list of tuples
+        flat_points = [coord for point in lens_points for coord in point]
+        self.canvas.create_polygon(*flat_points, fill=color, outline=color)
+        #self.draw_polygon_flicker(lens_points)
 
     def _draw_happy_lens(self, lx, ly, lw, lh, color):
-        # half-ellipse
+        # Half-ellipse
         num_points = 100
         lens_points = []
         rx = lw / 2
@@ -275,12 +275,14 @@ class RoboEyesApp:
             y = cy - ry * math.sin(theta)
             lens_points.append((x, y))
 
-        # close the bottom
+        # Close the bottom
         lens_points.append((lx + lw, ly + lh))
         lens_points.append((lx,      ly + lh))
 
-        self.canvas.create_polygon(*lens_points, fill=color, outline=color)
-        self.draw_polygon_flicker(lens_points)
+        # Flatten the list of tuples
+        flat_points = [coord for point in lens_points for coord in point]
+        self.canvas.create_polygon(*flat_points, fill=color, outline=color)
+        #self.draw_polygon_flicker(lens_points)
 
     def _draw_neutral_lens(self, lx, ly, lw, lh, color):
         lens_points = [
@@ -289,11 +291,13 @@ class RoboEyesApp:
             (lx + lw, ly + lh),
             (lx,      ly + lh)
         ]
-        self.canvas.create_polygon(*lens_points, fill=color, outline=color)
-        self.draw_polygon_flicker(lens_points)
+        # Flatten the list of tuples
+        flat_points = [coord for point in lens_points for coord in point]
+        self.canvas.create_polygon(*flat_points, fill=color, outline=color)
+        #self.draw_polygon_flicker(flat_points)
 
     # --------------------------------------------------------------------------
-    # Flicker-Scan-line Logic (unchanged)
+    # Flicker-Scan-line Logic (Optional)
     # --------------------------------------------------------------------------
     def draw_polygon_flicker(self, points):
         """
@@ -311,7 +315,7 @@ class RoboEyesApp:
                 continue
             inter_xs.sort()
 
-            # pair up intersection points
+            # Pair up intersection points
             for i in range(0, len(inter_xs)-1, 2):
                 x1 = inter_xs[i]
                 x2 = inter_xs[i+1]
@@ -357,7 +361,7 @@ class RoboEyesApp:
     # Random Blinking (unchanged)
     # --------------------------------------------------------------------------
     def schedule_random_blink(self):
-        interval_ms = random.uniform(1.0, 5.0) * 1000
+        interval_ms = random.uniform(0.3, 2.0) * 1000  # Further reduced interval for even faster blinking
         self.root.after(int(interval_ms), self._random_blink)
 
     def _random_blink(self):
@@ -365,44 +369,69 @@ class RoboEyesApp:
             self.blink()
         self.schedule_random_blink()
 
+    # ---------------------
+    # Command Processing
+    # ---------------------
+    def process_commands(self):
+        """
+        Check the command queue and process any pending commands.
+        """
+        while not self.cmd_queue.empty():
+            try:
+                cmd = self.cmd_queue.get_nowait()
+            except queue.Empty:
+                break  # No more commands
 
-def poll_console(app):
-    """
-    Non-blocking read from stdin using select.
-    """
-    if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
-        line = sys.stdin.readline().strip().lower()
-        if not line:
-            return
+            if cmd in ["quit", "exit"]:
+                print("Exiting on command.")
+                self.root.quit()
+                return
+            elif cmd in [DIRECTION_LEFT, DIRECTION_RIGHT, DIRECTION_STRAIGHT]:
+                self.set_direction(cmd)
+                print(f"Set direction to {cmd}")
+            elif cmd == "blink":
+                self.blink()
+                print("Blinking!")
+            elif cmd in ["happy", "angry", "neutral"]:
+                self.set_emotion(cmd)
+                print(f"Emotion set to {cmd}")
+            else:
+                print("Unknown command:", cmd)
 
-        if line in ["quit", "exit"]:
-            print("Exiting on command.")
-            app.root.quit()
-            return
-        elif line in [DIRECTION_LEFT, DIRECTION_RIGHT, DIRECTION_STRAIGHT]:
-            app.set_direction(line)
-            print(f"Set direction to {line}")
-        elif line == "blink":
-            app.blink()
-            print("Blinking!")
-        elif line in ["happy", "angry", "neutral"]:
-            app.set_emotion(line)
-            print(f"Emotion set to {line}")
-        else:
-            print("Unknown command:", line)
-
-    app.root.after(200, poll_console, app)
-
+        # Schedule the next command check
+        self.root.after(1, self.process_commands)  # Check every 1 ms
 
 def main():
     print("Commands: left, right, straight, blink, happy, angry, neutral, quit/exit")
     root = tk.Tk()
-    app = RoboEyesApp(root, width=900, height=450, fps=30)
 
-    poll_console(app)
+    # Remove window decorations (border, title bar, etc.)
+    root.overrideredirect(True)
+
+    # Make the window full screen using the -fullscreen attribute
+    root.attributes("-fullscreen", True)
+
+    # Hide the mouse cursor for the root window
+    root.config(cursor="none")
+
+    # Bind the Escape key to exit full screen
+    root.bind('<Escape>', lambda e: root.destroy())
+
+    # Create the RoboEyesApp with the command queue
+    app = RoboEyesApp(
+        root,
+        width=root.winfo_screenwidth(),
+        height=root.winfo_screenheight(),
+        fps=120,  # Further increased FPS for even smoother and faster animations
+        cmd_queue=command_queue  # Pass the command queue
+    )
+
+    # Additionally, hide the cursor on the canvas
+    app.canvas.config(cursor="none")
+
+    # No need to call poll_console anymore
     root.mainloop()
     print("GUI closed. Exiting...")
-
 
 if __name__ == "__main__":
     main()
