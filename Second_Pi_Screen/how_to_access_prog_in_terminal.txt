@@ -1,0 +1,22 @@
+Step 3: Access the Program's Terminal via SSH
+Once your Raspberry Pi is running, SSH into it:
+
+ssh comrade@raspberrypi
+Now, attach to the running session:
+
+tmux attach-session -t eyes_tcpip
+You are now inside the interactive terminal of Eyes_TCPIP.py and can type commands directly.
+
+Step 4: Detach Without Stopping the Program
+If you need to leave the session but keep it running, press:
+
+CTRL + B, then D
+This detaches you from tmux while keeping the Python program running.
+
+Step 5: Stop or Restart the Program
+If you want to stop the running program:
+
+tmux kill-session -t eyes_tcpip
+To restart it:
+
+tmux new-session -d -s eyes_tcpip "python3 /home/comrade/Eyes_TCPIP.py"
