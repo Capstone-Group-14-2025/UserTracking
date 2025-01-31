@@ -153,7 +153,7 @@ class CameraNode:
     - Retries multiple times to ensure the camera is freed before use.
     """
 
-    def __init__(self, camera_index=0, width=640, height=240, max_retries=5, delay=1):
+    def __init__(self, camera_index=0, width=320, height=240, max_retries=5, delay=1):
         self.camera_index = camera_index
         self.width = width
         self.height = height
@@ -570,19 +570,21 @@ class DistanceAngleTracker:
                 break
 
             distances = self.ultrasonic_sensor.read_distances()
-            print("Ultrasonic distances:", distances)  # CM is measurement
-            if any(distance is not None and distance < 30 for distance in distances.values()):
-                print("YOU ARE TOO CLOSE")
-                if self.serial_enabled:
-                    self.serial_output.send_velocities(0, 0)
+            #print("Ultrasonic distances:", distances)  # CM is measurement
+            #if any(distance is not None and distance < 30 for distance in distances.values() and False):
+            #    print("YOU ARE TOO CLOSE")
+            #    if self.serial_enabled:
+            #        self.serial_output.send_velocities(0, 0)
 
             # Check user input at any time
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
-                self.signal_status("Tracking Stopped")
-                skip_polling_check = True
+                
                 if self.serial_enabled:
                     self.serial_output.send_velocities(0, 0)
+                self.signal_status("Tracking Stopped")
+                skip_polling_check = True
+                
                 break
             elif key == ord('c'):
                 self.signal_status("Calibration")
@@ -653,10 +655,10 @@ class DistanceAngleTracker:
 
                     wl = angular_vel + w_hat_l
                     wr = -angular_vel + w_hat_r
-                    wr = min(wr, 0.125)
-                    wl = min(wl, 0.125)
-                    wr = max(wr, -0.125)
-                    wl = max(wl, -0.125)
+                    wr = min(wr, 0.08)
+                    wl = min(wl, 0.08)
+                    wr = max(wr, -0.08)
+                    wl = max(wl, -0.08)
                     print("Angular Velocity:", angular_vel)
                     print("Angle Offset:", angle_offset_int)
                     print("wr:", wr, " ", "wl:", wl)
@@ -694,14 +696,14 @@ class DistanceAngleTracker:
 
                 else:
                     # --- If Mediapipe fails, fallback to feature-based tracking ---
-                    new_bbox = self.feature_tracker.track_object(frame)
-                    if new_bbox is not None:
-                        bbox = new_bbox
-                    else:
-                        cv2.putText(frame, "Tracking lost!", (50, 80),
+                    #new_bbox = self.feature_tracker.track_object(frame)
+                    #if new_bbox is None:
+                    #     bbox = new_bbox
+                    # else:
+                    cv2.putText(frame, "Tracking lost!", (50, 80),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 255), 2)
-                        if self.serial_enabled:
-                            self.serial_output.send_velocities(0, 0)
+                    if self.serial_enabled:
+                        self.serial_output.send_velocities(0, 0)
 
                 # Store the last known values for frames when polling skips updates
                 last_distance = distance
@@ -817,26 +819,25 @@ class DistanceAngleTracker:
 #             MAIN
 # ----------------------------
 if __name__ == "__main__":
-    #args = sys.argv
-    #if len(args) > 1:
-    #    distance_arg = float(args[1])
-    #else:
-    #    distance_arg = 0.5
+    args = sys.argv
+    if len(args) > 1:
+        distance_arg = float(args[1])
+    else:
+        distance_arg = 0.5
 
-    #if not (0 < distance_arg < 1):
-    #    distance_arg = 0.5
+    print(distance_arg)
 
     tracker = DistanceAngleTracker(
         camera_index=0,
-        target_distance=0.5,         # Desired distance to maintain
-        reference_distance=0.5,  # Known distance for calibration
-        polling_interval=0.2,
+        target_distance=distance_arg,         # Desired distance to maintain
+        reference_distance=distance_arg,  # Known distance for calibration
+        polling_interval=0,
         port='/dev/ttyUSB0',
         baudrate=9600,
-        serial_enabled=False,
-        draw_enabled=True,
-        kv=0.8,
-        kw=0.005,
+        serial_enabled=True,
+        draw_enabled=False,
+        kv=0.1,
+        kw=0.00095,
 
     )
 
