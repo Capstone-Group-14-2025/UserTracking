@@ -8,6 +8,7 @@ import threading
 import os
 import subprocess
 import socket
+import json
 
 # If you have Raspberry Pi and real ultrasonic sensors, uncomment and configure:
 # import RPi.GPIO as GPIO
@@ -26,6 +27,62 @@ TIMEOUT = 0.04  # 40ms for ultrasonic timeouts
 
 # Path for listening to commands from Bluetooth code
 COMMAND_SOCKET_PATH = "/tmp/command_socket"
+
+
+# ----------------------------------------
+#    TCP SERVER THREAD
+# ----------------------------------------
+class SensorServer:
+    def __init__(self, host="192.168.0.3", port=5000):
+        """Initialize the TCP server"""
+        self.host = host
+        self.port = port
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.bind((self.host, self.port))
+        self.server.listen(5)
+        self.data = None
+        self.lock = threading.Lock()  # Thread-safe access to data
+        print(f"[TCP] Server listening on {self.host}:{self.port}")
+
+    def handle_client(self, client_socket, addr):
+        """Handles incoming client connections"""
+        print(f"[TCP] Connected by {addr}")
+        try:
+            while True:
+                data = client_socket.recv(1024).decode()
+                if not data:
+                    break
+                try:
+                    json_data = json.loads(data)
+                    print(f"[TCP] Received Encoder Data: {json.dumps(json_data, indent=2)}")
+                    with self.lock:
+                        self.data = json_data  # Store latest data safely
+                except json.JSONDecodeError:
+                    print(f"[TCP] Invalid JSON received: {data}")
+        except ConnectionResetError:
+            print(f"[TCP] Client {addr} disconnected.")
+        finally:
+            client_socket.close()
+
+    def start(self):
+        """Starts the TCP server loop in a separate thread"""
+        while True:
+            client_socket, addr = self.server.accept()
+            client_thread = threading.Thread(target=self.handle_client, args=(client_socket, addr))
+            client_thread.daemon = True
+            client_thread.start()
+
+    def get_data(self):
+        """Retrieve the latest encoder data safely"""
+        with self.lock:
+            return self.data
+
+    def stop(self):
+        """Stops the server"""
+        self.server.close()
+        print("[TCP] Server stopped.")
+
+
 
 
 # ----------------------------------------
@@ -340,31 +397,140 @@ class DistanceCalculator:
 # ----------------------------------------
 #   MOVEMENT CONTROLLER (LOGIC ONLY)
 # ----------------------------------------
-class MovementController:
-    def __init__(self,
-                 kv=0.1,
-                 kw=0.001,
-                 target_distance=0.5,
-                 distance_tolerance=0.1,
-                 angle_tolerance_deg=25):
+import time
+
+class EnhancedMovementController:
+    def __init__(self, 
+                 sensor_server, 
+                 kv=0.1, 
+                 kw=0.001, 
+                 kp_pos=0.05, 
+                 kv_vel=0.02, 
+                 ki=0.01, 
+                 target_distance=0.5, 
+                 distance_tolerance=0.1, 
+                 angle_tolerance_deg=25, 
+                 max_integral=1.0):
+        
+        # Control gains
+        self.kv = kv          
+        self.kw = kw          
+        self.kp_pos = kp_pos  
+        self.kv_vel = kv_vel  
+        self.ki = ki          
+        
+        # Target parameters
         self.target_distance = target_distance
         self.distance_tolerance = distance_tolerance
         self.angle_tolerance_deg = angle_tolerance_deg
-        self.kv = kv  # linear gain
-        self.kw = kw  # angular gain
+        
+        # Integral control
+        self.max_integral = max_integral
+        self.distance_integral = 0
+        self.angle_integral = 0
+        
+        # Previous errors for derivative control
+        self.prev_distance_err = 0
+        self.prev_angle_err = 0
+        
+        # Previous encoder positions
+        self.prev_left_pos = 0
+        self.prev_right_pos = 0
+        
+        # Timestamps for derivative calculations
+        self.last_update_time = None
+
+        # Sensor Server for retrieving encoder data
+        self.sensor_server = sensor_server  
+        self.sensor_server.start()
+
+    def reset_integrals(self):
+        """Reset integral terms"""
+        self.distance_integral = 0
+        self.angle_integral = 0
+        self.prev_distance_err = 0
+        self.prev_angle_err = 0
+        self.last_update_time = None
+        self.prev_left_pos = 0
+        self.prev_right_pos = 0
+
+    def process_encoder_data(self):
+        """Fetch encoder data from SensorServer and parse it"""
+        encoder_data = self.sensor_server.get_data()  # Get latest data
+        if encoder_data is None:
+            print("[Warning] No encoder data received yet.")
+            return 0, 0, 0, 0, 1, 1
+
+        try:
+            motor1 = encoder_data.get('motor1', {})
+            motor2 = encoder_data.get('motor2', {})
+
+            left_pos = float(motor1.get('position', 0))
+            left_vel = float(motor1.get('velocity', 0))
+            left_dir = 1 if motor1.get('direction', 1) > 0 else -1
+
+            right_pos = float(motor2.get('position', 0))
+            right_vel = float(motor2.get('velocity', 0))
+            right_dir = 1 if motor2.get('direction', 1) > 0 else -1
+
+            return left_pos, left_vel, right_pos, right_vel, left_dir, right_dir
+        except (ValueError, AttributeError) as e:
+            print(f"Error processing encoder data: {e}")
+            return 0, 0, 0, 0, 1, 1
 
     def compute_control(self, distance, angle_offset_deg):
-        if distance is None:
-            distance_err = 0
+        """Compute control outputs using both vision and encoder feedback"""
+        current_time = time.time()
+        if self.last_update_time is None:
+            dt = 0.1  
         else:
-            distance_err = distance - self.target_distance
+            dt = current_time - self.last_update_time
 
+        # Get encoder data
+        left_pos, left_vel, right_pos, right_vel, left_dir, right_dir = self.process_encoder_data()
+
+        # Compute errors
+        distance_err = 0 if distance is None else distance - self.target_distance
         angle_err = angle_offset_deg
 
-        linear_vel = self.kv * distance_err
-        angular_vel = self.kw * angle_err
+        # Integral updates with anti-windup
+        self.distance_integral = max(min(self.distance_integral + distance_err * dt, self.max_integral), -self.max_integral)
+        self.angle_integral = max(min(self.angle_integral + angle_err * dt, self.max_integral), -self.max_integral)
 
-        return linear_vel, angular_vel
+        # Position feedback
+        left_pos_error = left_pos - self.prev_left_pos
+        right_pos_error = right_pos - self.prev_right_pos
+
+        # PID Control
+        linear_vel = self.kv * distance_err + self.ki * self.distance_integral
+        angular_vel = self.kw * angle_err + self.ki * self.angle_integral
+
+        # Convert to wheel speeds
+        wheelbase_factor = 0.5
+        base_speed = linear_vel / wheelbase_factor
+        target_left = angular_vel + base_speed
+        target_right = -angular_vel + base_speed
+
+        # Apply position and velocity corrections
+        target_left += self.kp_pos * left_pos_error * left_dir
+        target_right += self.kp_pos * right_pos_error * right_dir
+
+        target_left += self.kv_vel * (target_left - left_vel)
+        target_right += self.kv_vel * (target_right - right_vel)
+
+        # Clamp speeds
+        max_speed = 0.08
+        final_left = max(min(target_left, max_speed), -max_speed)
+        final_right = max(min(target_right, max_speed), -max_speed)
+
+        # Update previous values
+        self.prev_distance_err = distance_err
+        self.prev_angle_err = angle_err
+        self.prev_left_pos = left_pos
+        self.prev_right_pos = right_pos
+        self.last_update_time = current_time
+
+        return final_left, final_right
 
 
 # ----------------------------------------
@@ -397,7 +563,8 @@ class DistanceAngleTracker:
                  serial_enabled=False,
                  draw_enabled=True,
                  kv=0.1,
-                 kw=0.00095):
+                 kw=0.00095,
+                 tcp_server = None):
         # Settings
         self.polling_interval = polling_interval
         self.last_poll_time = time.time()
@@ -421,8 +588,11 @@ class DistanceAngleTracker:
         print("Initializing distance calculator...")
         self.distance_calculator = DistanceCalculator(reference_distance)
 
+        print("Initializing TCP server...")
+        self.tcp_server = SensorServer()
+
         print("Initializing movement controller...")
-        self.movement_controller = MovementController(kv=kv, kw=kw, target_distance=target_distance)
+        self.movement_controller = EnhancedMovementController(self.tcp_server, kv=kv, kw=kw, target_distance=target_distance)
 
         if self.serial_enabled:
             print("Initializing serial output...")
@@ -551,6 +721,7 @@ class DistanceAngleTracker:
         self.signal_status("Tracking Started")
         last_time_polled = time.time()
         previous_angle_offset = 0
+        tcp_thread = threading.Thread(target=self.tcp_server.start, daemon=True)
 
         while True:
             # If "stop" was commanded, break out
@@ -610,6 +781,8 @@ class DistanceAngleTracker:
                     else:
                         previous_angle_offset = angle_int
 
+                    
+
                     # Compute wheel speeds
                     linear_vel, angular_vel = self.movement_controller.compute_control(distance_est, angle_int)
                     wheelbase_factor = 0.5
@@ -654,14 +827,16 @@ class DistanceAngleTracker:
     # --------------------------------------------------
     def cleanup(self):
         """
-        Cleanup all resources: camera, serial, ultrasonic, windows, etc.
+        Cleanup all resources: camera, serial, ultrasonic, windows, tcp server etc.
         """
         print("Performing final cleanup...")
         self.camera_node.stop()
+
         if self.serial_output:
             self.serial_output.close()
         self.ultrasonic_sensor.cleanup()
         cv2.destroyAllWindows()
+        
         print("All resources released.")
 
 
@@ -704,6 +879,8 @@ def main():
     # Start the socket-listening thread, passing the tracker so commands can set flags
     socket_thread = threading.Thread(target=listen_for_socket_commands, args=(tracker,), daemon=True)
     socket_thread.start()
+
+
 
     try:
         # If you want to automatically calibrate + track at startup,
