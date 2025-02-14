@@ -8,6 +8,9 @@ import threading
 import os
 import subprocess
 import socket
+from datetime import datetime
+import lgpio
+
 
 # If you have Raspberry Pi and real ultrasonic sensors, uncomment and configure:
 # import RPi.GPIO as GPIO
@@ -23,6 +26,7 @@ SENSORS = {
     # "back":  {"TRIG": 19, "ECHO": 20},
 }
 TIMEOUT = 0.04  # 40ms for ultrasonic timeouts
+MOVING_AVG_SIZE = 1
 
 # Path for listening to commands from Bluetooth code
 COMMAND_SOCKET_PATH = "/tmp/command_socket"
@@ -187,7 +191,7 @@ class CameraNode:
     """
     Runs a separate thread to continually capture frames from the camera.
     """
-    def __init__(self, camera_index=0, width=320, height=240, max_retries=5, delay=1):
+    def __init__(self, camera_index=0, width=640, height=360, max_retries=5, delay=1):
         self.camera_index = camera_index
         self.width = width
         self.height = height
@@ -288,13 +292,47 @@ class UltrasonicSensor:
         self.cached_distances = {name: None for name in self.sensors}
         self.lock = threading.Lock()
 
+        # Open GPIO chip
+        self.chip = lgpio.gpiochip_open(0)
+
+        for name, pins in self.sensors.items():
+            lgpio.gpio_claim_output(self.chip, pins["TRIG"])
+            lgpio.gpio_claim_input(self.chip, pins["ECHO"])
+
+            # Ensure the TRIG pin starts LOW
+            lgpio.gpio_write(self.chip, pins["TRIG"], 0)
+
     def measure_distance(self, trig, echo):
         """
-        Dummy function. Replace with real code if using actual hardware.
+        Measure distance using an ultrasonic sensor.
         """
-        # Example with lgpio or RPi.GPIO goes here.
-        # Return distance in cm or None if invalid.
-        return 0  # for demonstration
+        lgpio.gpio_write(self.chip, trig, 0)
+        time.sleep(0.000002)
+
+        # Send a 10us pulse to TRIG
+        lgpio.gpio_write(self.chip, trig, 1)
+        time.sleep(0.00001)
+        lgpio.gpio_write(self.chip, trig, 0)
+
+        # Wait for ECHO to go HIGH
+        start_time = time.time()
+        while lgpio.gpio_read(self.chip, echo) == 0:
+            if time.time() - start_time > TIMEOUT:
+                return None  # Timeout
+
+        pulse_start = time.time()
+
+        # Wait for ECHO to go LOW
+        while lgpio.gpio_read(self.chip, echo) == 1:
+            if time.time() - pulse_start > TIMEOUT:
+                return None  # Timeout
+
+        pulse_end = time.time()
+
+        # Compute distance
+        pulse_duration = pulse_end - pulse_start
+        distance = (pulse_duration * 34300) / 2  # Round-trip time
+        return round(distance, 2)
 
     def _thread_measure(self, sensor_name, trig, echo):
         dist = self.measure_distance(trig, echo)
@@ -314,8 +352,10 @@ class UltrasonicSensor:
         return self.cached_distances
 
     def cleanup(self):
-        # If you have GPIO or lgpio open, clean it up here
-        pass
+        """
+        Release GPIO resources.
+        """
+        lgpio.gpiochip_close(self.chip)
 
 
 # ----------------------------------------
@@ -371,12 +411,14 @@ class MovementController:
 #       SERIAL OUTPUT NODE
 # ----------------------------------------
 class SerialOutput:
-    def __init__(self, port='/dev/ttyUSB0', baudrate=9600):
+    def __init__(self, port='/dev/serial0', baudrate=9600):
         self.ser = serial.Serial(port, baudrate)
 
     def send_velocities(self, wl, wr):
-        msg = f"w_l:{wl:.3f} w_r:{wr:.3f}\n"
+
+        msg = f"w_l:{-wr:.3f} w_r:{-wl:.3f}\n"
         self.ser.write(msg.encode('utf-8'))
+        print(wl, " ", wr)
 
     def close(self):
         if self.ser and self.ser.is_open:
@@ -392,7 +434,7 @@ class DistanceAngleTracker:
                  target_distance=0.5,
                  reference_distance=0.5,
                  polling_interval=0.3,
-                 serial_port='/dev/ttyUSB0',
+                 serial_port='/dev/serial0',
                  baudrate=9600,
                  serial_enabled=False,
                  draw_enabled=True,
@@ -487,6 +529,7 @@ class DistanceAngleTracker:
             if self.pending_stop:
                 print("[Calibration] Stop requested.")
                 self.signal_status("Calibration Stopped")
+                self.serial_output.send_velocities(0, 0)
                 break
 
             frame = self.camera_node.retrieve_latest_frame()
@@ -551,11 +594,13 @@ class DistanceAngleTracker:
         self.signal_status("Tracking Started")
         last_time_polled = time.time()
         previous_angle_offset = 0
-
+        distance_est_old = 0
+        last_change_time = time.time()
         while True:
             # If "stop" was commanded, break out
             if self.pending_stop:
                 self.signal_status("Tracking Stopped")
+                self.serial_output.send_velocities(0, 0)
                 break 
 
             frame = self.camera_node.retrieve_latest_frame()
@@ -571,7 +616,10 @@ class DistanceAngleTracker:
                     break
 
             # Check ultrasonic sensors
-            distances = self.ultrasonic_sensor.read_distances()
+            #distances = self.ultrasonic_sensor.read_distances()
+            #print(distances)
+            #if (distances.get("front") is not None and distances.get("front") < 30) or (distances.get("left") is not None and distances.get("left") < 30):
+            #    continue
             # (Optional logic to handle obstacles)
 
             # Throttle main logic
@@ -614,14 +662,25 @@ class DistanceAngleTracker:
                     linear_vel, angular_vel = self.movement_controller.compute_control(distance_est, angle_int)
                     wheelbase_factor = 0.5
                     base_speed = linear_vel / wheelbase_factor
+                    
                     wl = angular_vel + base_speed
                     wr = -angular_vel + base_speed
                     # clamp
-                    max_speed = 0.08
+                    max_speed = 0.4
                     wl = max(min(wl, max_speed), -max_speed)
                     wr = max(min(wr, max_speed), -max_speed)
-
-                    print(f"[Tracking] Dist={distance_est}, Angle={angle_int}, wl={wl:.3f}, wr={wr:.3f}")
+                    """
+                    #For Timeing
+                    if distance_est_old is None or abs(distance_est - distance_est_old) > (0.05 * distance_est_old):
+                        current_time = time.time()
+                        time_since_change = current_time - last_change_time
+                        print(f"Distance changed! Time since last change: {time_since_change:.2f} seconds")
+                        
+                        # Update old value and last change time
+                        distance_est_old = distance_est
+                        last_change_time = current_time
+                    """
+                    #print(f"[Tracking] Dist={distance_est}, Angle={angle_int}, wl={wl:.3f}, wr={wr:.3f}")
                     if self.serial_enabled and self.serial_output:
                         self.serial_output.send_velocities(wl, wr)
 
@@ -692,13 +751,13 @@ def main():
         camera_index=0,
         target_distance=distance_arg,
         reference_distance=distance_arg,
-        polling_interval=0.1,       # how often to compute new control in seconds
+        polling_interval=0.3,       # how often to compute new control in seconds
         serial_port='/dev/ttyUSB0',
         baudrate=9600,
-        serial_enabled=False,       # Change if you have a robot & serial connection
+        serial_enabled=True,       # Change if you have a robot & serial connection
         draw_enabled=True,          # True => show OpenCV windows
-        kv=0.1,
-        kw=0.00095,
+        kv=0.3,
+        kw=0.005,
     )
 
     # Start the socket-listening thread, passing the tracker so commands can set flags
@@ -715,9 +774,11 @@ def main():
 
     finally:
         # Always release resources even if code exits unexpectedly
+        tracker.serial_output.send_velocities(0, 0)
         tracker.cleanup()
         print("Goodbye!")
 
 
 if __name__ == "__main__":
     main()
+    
