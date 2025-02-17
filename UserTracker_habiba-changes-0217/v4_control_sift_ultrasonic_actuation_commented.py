@@ -1,3 +1,20 @@
+"""
+file:           v4_control_sift_ultrasonic_actuation_commented.py
+version:        v.4
+
+Description:    - refactored v0.0  reorganize classes and functions
+                - renamed classes and functions
+                - moved any functions outside of classes into a respective class
+                - improved shutdown process to better handle exceptions and always send 0,0 velocities
+                - added capture and saving of features for SIFT re-id
+                - added tracking/lost states to trigger SIFT for re-id
+                - added parameters to tune SIFT such as downsample_scale, sift_interval for CPU performance
+                - added improved comments to the code for clarity
+                - added ultrasonic sensor logic for emergency stop in case of obstacles in UserTrackerApp
+                NEW: - prioritize rotation over linear speed if angle is large
+                NEW: - added smoothing for both linear and angular velocities
+"""
+
 import cv2
 import mediapipe as mp
 import serial

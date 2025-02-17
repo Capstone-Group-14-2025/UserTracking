@@ -1,3 +1,10 @@
+"""
+file:           v0_control_github_commit_078ccf5.py
+version:        v.0.0
+
+Description:    A copy of the control.py file from the UserTracker main branch, commit #078ccf5 downloaded on 02/15/2025.
+"""
+
 import cv2
 import mediapipe as mp
 import serial

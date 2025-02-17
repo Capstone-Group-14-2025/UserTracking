@@ -1,3 +1,17 @@
+"""
+file:           v2.2_control_sift.py
+version:        v.2.2
+
+Description:    - refactored v0.0  reorganize classes and functions
+                - renamed classes and functions
+                - moved any functions outside of classes into a respective class
+                - improved shutdown process to better handle exceptions and always send 0,0 velocities
+                - added capture and saving of features for SIFT re-id
+                - added tracking/lost states to trigger SIFT for re-id
+                NEW: - added parameters to tune SIFT such as downsample_scale, sift_interval for CPU performance
+                NEW: - added improved comments to the code for clarity
+"""
+
 import cv2
 import mediapipe as mp
 import serial
