@@ -1,6 +1,6 @@
 """
-file:           v5_control_sift_ultrasonic_actuation_commented_debug.py
-version:        v.5
+file:           v6_control_sift_ultrasonic_actuation_commented_debug.py
+version:        v.6
 
 Description:    - refactored v0.0  reorganize classes and functions
                 - renamed classes and functions
