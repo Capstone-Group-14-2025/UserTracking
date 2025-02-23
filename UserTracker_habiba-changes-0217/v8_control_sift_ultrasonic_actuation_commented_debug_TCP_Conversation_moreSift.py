@@ -662,7 +662,8 @@ class UserTrackerApp:
         tcp_host_ip,
         tcp_LCD_port,
         tcp_conversation_port, 
-        background_sift_check_interval
+        background_sift_check_interval, 
+        num_sift_frames
     ):
         
         self.target_distance = target_distance
@@ -682,6 +683,7 @@ class UserTrackerApp:
         self.pending_calibrate = False
         self.background_sift_check_interval = background_sift_check_interval
         self._frame_lock = threading.Lock()
+        self.num_sift_frames = num_sift_frames
 
 
         # Create the TCP client for LCD screen.
@@ -775,24 +777,41 @@ class UserTrackerApp:
     def _background_sift_checker(self):
         """
         Runs in the background, periodically checking whether the user
-        can still be re-identified via SIFT. If not enough matches
-        are found, set state to LOST.
+        can still be re-identified via SIFT. We grab `self.num_sift_frames`
+        frames in succession and only declare LOST if *all* fail.
         """
         while not self._stop_background_thread_event.is_set():
+            # Sleep for the configured interval
             time.sleep(self.background_sift_check_interval)
 
-            # Only do SIFT re-checks if we believe we are currently TRACKING
+            # Only do re-check if we believe we are currently TRACKING
             if self.tracking_state == "TRACKING":
                 if not self.visual_tracker.initialized:
                     continue
 
-                frame = self._get_latest_frame_safe()
-                if frame is None:
+                # Collect multiple frames
+                frames_to_check = []
+                for _ in range(self.num_sift_frames):
+                    frame = self._get_latest_frame_safe()
+                    if frame is not None:
+                        frames_to_check.append(frame)
+                    # Small sleep if you want to space out the captures
+                    time.sleep(0.05)
+
+                if not frames_to_check:
                     continue
 
-                tracked_bbox = self.visual_tracker.track_object_in_frame(frame)
-                if tracked_bbox is None:
-                    print("[Debug] Background check: user no longer detected via SIFT.")
+                # Check SIFT on each frame
+                match_found = False
+                for frame in frames_to_check:
+                    tracked_bbox = self.visual_tracker.track_object_in_frame(frame)
+                    if tracked_bbox is not None:
+                        # If ANY frame succeeded, user is still tracked
+                        match_found = True
+                        break
+
+                if not match_found:
+                    print("[Debug] Background check: user not detected in all collected frames.")
                     self.tracking_state = "LOST"
                     self.conversation_client.send("user lost (background thread)")
 
@@ -1233,7 +1252,8 @@ def main():
         tcp_host_ip="140.193.235.72",
         tcp_LCD_port=12345,
         tcp_conversation_port=54321, 
-        background_sift_check_interval = 3.0
+        background_sift_check_interval = 3.0, 
+        num_sift_frames = 5
     )
 
     #socket listener:
