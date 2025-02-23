@@ -1,6 +1,6 @@
 """
-file:           v7_control_sift_ultrasonic_actuation_commented_debug_TCP_Conversation.py
-version:        v.7
+file:           v8_control_sift_ultrasonic_actuation_commented_debug_TCP_Conversation.py
+version:        v.8
 
 Description:    - refactored v0.0  reorganize classes and functions
                 - renamed classes and functions
@@ -16,7 +16,8 @@ Description:    - refactored v0.0  reorganize classes and functions
                 - added more debug prints for better understanding of the code during debugging
                 - added visualization of bounding box around user for debugging
                 - added tcpip in separate thread with messages being sent to second pi for LCD screen
-                NEW: - added tcpip in separate thread with messages being sent to second pi for conversation
+                - added tcpip in separate thread with messages being sent to second pi for conversation
+                NEW: - added background thread that checks SIFT descriptors for re-identification while tracking every 1 second
 """
 
 import cv2
@@ -368,7 +369,6 @@ class CameraManager:
             self.cap.release()
         print("[Debug] Camera capture stopped and camera released.")
 
-
 class PoseEstimator:
     """
     Wraps Mediapipe's Pose solution for easy pose detection.
@@ -392,7 +392,6 @@ class PoseEstimator:
             return None
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         return self.pose.process(rgb)
-
 
 class UltrasonicManager:
     """
@@ -478,7 +477,6 @@ class UltrasonicManager:
         """
         lgpio.gpiochip_close(self.chip)
         print("[Debug] UltrasonicManager GPIO cleaned up.")
-
 
 class DistanceEstimator:
     """
@@ -630,7 +628,6 @@ class SerialCommandSender:
         if self.ser and self.ser.is_open:
             self.ser.close()
 
-
 class UserTrackerApp:
     """
     Primary class that unifies the camera, pose detection, SIFT-based re-identification, motion control,
@@ -664,8 +661,10 @@ class UserTrackerApp:
         emergency_stop_distance,
         tcp_host_ip,
         tcp_LCD_port,
-        tcp_conversation_port
+        tcp_conversation_port, 
+        background_sift_check_interval
     ):
+        
         self.target_distance = target_distance
         self.reference_distance = reference_distance
         self.polling_interval = polling_interval
@@ -681,6 +680,9 @@ class UserTrackerApp:
         self.pending_start = False
         self.pending_stop = False
         self.pending_calibrate = False
+        self.background_sift_check_interval = background_sift_check_interval
+        self._frame_lock = threading.Lock()
+
 
         # Create the TCP client for LCD screen.
         self.LCD_client = TCPClient(host=self.tcp_host_ip, port=self.tcp_LCD_port)
@@ -693,7 +695,8 @@ class UserTrackerApp:
         self.conversation_client.start_sending_loop()
 
         # Tracking state: "TRACKING" or "LOST".
-        self.tracking_state = "LOST"
+        self._state_lock = threading.Lock()
+        self._tracking_state = "LOST"
 
         print("[Debug] Initializing CameraManager...")
         self.camera_manager = CameraManager(camera_index=camera_index)
@@ -727,11 +730,72 @@ class UserTrackerApp:
         print("[Debug] Initializing VisualFeatureTracker...")
         self.visual_tracker = VisualFeatureTracker(min_keypoints_threshold=5, ratio_threshold=0.7)
 
+        # For background SIFT re-checks
+        self.background_sift_check_interval = background_sift_check_interval
+        self._stop_background_thread_event = threading.Event()
+
+        # Start the background thread that periodically verifies we're still tracking the same user
+        self._background_thread = threading.Thread(
+            target=self._background_sift_checker,
+            daemon=True
+        )
+        self._background_thread.start()
+
         self.window_name = "Distance & Angle Tracker"
         self.max_speed = max_speed  # used for clamping speeds.
         self.emergency_stop_distance = emergency_stop_distance  # obstacle distance (in meters)
         print("[Debug] UserTrackerApp initialization complete.")
     
+    # ------------------------------------------------------------------------
+    # Thread-Safe Property for tracking_state
+    # ------------------------------------------------------------------------
+    @property
+    def tracking_state(self):
+        with self._state_lock:
+            return self._tracking_state
+
+    @tracking_state.setter
+    def tracking_state(self, value):
+        with self._state_lock:
+            self._tracking_state = value
+
+    # ------------------------------------------------------------------------
+    # Optionally lock frame retrieval if camera_manager is not concurrency-safe
+    # ------------------------------------------------------------------------
+    def _get_latest_frame_safe(self):
+        """
+        Retrieves the latest frame from the camera in a thread-safe manner.
+        """
+        with self._frame_lock:
+            return self.camera_manager.get_latest_frame()
+
+    # ------------------------------------------------------------------------
+    # Background Thread Method
+    # ------------------------------------------------------------------------
+    def _background_sift_checker(self):
+        """
+        Runs in the background, periodically checking whether the user
+        can still be re-identified via SIFT. If not enough matches
+        are found, set state to LOST.
+        """
+        while not self._stop_background_thread_event.is_set():
+            time.sleep(self.background_sift_check_interval)
+
+            # Only do SIFT re-checks if we believe we are currently TRACKING
+            if self.tracking_state == "TRACKING":
+                if not self.visual_tracker.initialized:
+                    continue
+
+                frame = self._get_latest_frame_safe()
+                if frame is None:
+                    continue
+
+                tracked_bbox = self.visual_tracker.track_object_in_frame(frame)
+                if tracked_bbox is None:
+                    print("[Debug] Background check: user no longer detected via SIFT.")
+                    self.tracking_state = "LOST"
+                    self.conversation_client.send("user lost (background thread)")
+
     def extract_pose_metrics(self, results, frame):
         """
         Given Mediapipe results and a frame, compute:
@@ -864,7 +928,7 @@ class UserTrackerApp:
                 print("[Debug] Calibration stopped externally.")
                 break
 
-            frame = self.camera_manager.get_latest_frame()
+            frame = self._get_latest_frame_safe()
             if frame is None:
                 time.sleep(0.1)
                 continue
@@ -990,7 +1054,7 @@ class UserTrackerApp:
                     # We just performed a request_stop(), so break out.
                     break
 
-            frame = self.camera_manager.get_latest_frame()
+            frame = self._get_latest_frame_safe()
             if frame is None:
                 time.sleep(0.01)
                 continue
@@ -1105,6 +1169,11 @@ class UserTrackerApp:
         Stop capturing, close pose, close serial, cleanup GPIO, and destroy any windows.
         This should be called on program exit.
         """
+        # Signal the background thread to stop
+        self._stop_background_thread_event.set()
+        # Optionally join to ensure the thread fully exits
+        self._background_thread.join(timeout=2.0)
+
         print("[Debug] Cleaning up resources...")
         if self.serial_enabled and self.serial_sender:
             try:
@@ -1131,7 +1200,6 @@ class UserTrackerApp:
         
         cv2.destroyAllWindows()
         print("[Debug] Cleanup complete.")
-
 
 def main():
     """
@@ -1164,7 +1232,8 @@ def main():
         tcp_enabled=False,
         tcp_host_ip="140.193.235.72",
         tcp_LCD_port=12345,
-        tcp_conversation_port=54321
+        tcp_conversation_port=54321, 
+        background_sift_check_interval = 3.0
     )
 
     #socket listener:
@@ -1179,7 +1248,6 @@ def main():
         print(f"[Error] Unhandled exception: {e}")
     finally:
         tracker.cleanup_resources()
-
 
 if __name__ == "__main__":
     main()
