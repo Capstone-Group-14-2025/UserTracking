@@ -777,6 +777,8 @@ class UserTrackerApp:
                     cmd = parts[0]
                     if cmd == "stop":
                         self.request_stop()
+                        # because this is user input, we also send a quit to the conversation to end sesssion
+                        self.conversation_client.send("end session")
                     elif cmd == "calibrate":
                         self.request_calibration()
                     elif cmd == "start":
@@ -792,8 +794,8 @@ class UserTrackerApp:
         """
         Signals that we want to stop all tracking and motion.
         """
-        # Send message to TCPIP
-        self.conversation_client.send("stop")
+        # # Send message to TCPIP
+        # self.conversation_client.send("stop")
         print("[Debug] Stop requested.")
         if self.serial_enabled and self.serial_sender:
             self.serial_sender.send_wheel_velocities(0, 0)
@@ -823,7 +825,7 @@ class UserTrackerApp:
         Optionally updates the target/reference distance.
         """
         # Send start message to TCPIP
-        self.conversation_client.send("start")
+        self.conversation_client.send("start session")
         print(f"[Debug] Start requested with distance={distance}.")
         if distance is not None:
             self.motion_controller.target_distance = distance
@@ -953,6 +955,7 @@ class UserTrackerApp:
         for sensor_name, dist_cm in distances.items():
             if dist_cm is not None and dist_cm < stop_threshold_cm:
                 print(f"[Emergency Stop] Obstacle at {dist_cm} cm on sensor '{sensor_name}'")
+                self.conversation_client.send("obstacle detected")
                 self.request_stop()
                 return True
         return False
@@ -1120,6 +1123,9 @@ class UserTrackerApp:
 
         if self.ultrasonic_enabled and self.ultrasonic:
             self.ultrasonic.cleanup_gpio()
+        
+        self.conversation_client.send("end session")
+        
         cv2.destroyAllWindows()
         print("[Debug] Cleanup complete.")
 

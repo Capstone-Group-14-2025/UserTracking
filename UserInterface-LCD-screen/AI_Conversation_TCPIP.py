@@ -37,14 +37,14 @@ HOST = "0.0.0.0"
 PORT = 54321
 
 ALERT_MESSAGES = {
-    "start": "We’re now getting started. Please stand in front of me at the distance you want and press calibrate when you are ready.",
+    "start session": "We’re now getting started. Please stand in front of me at the distance you want and press calibrate when you are ready.",
     "calibration complete": "Calibration done. I’m now following you.",
     "obstacle detected": "Obstacle detected, stopping now.",
-    "user lost": "User lost, please come back in my field of view.",
+    "user lost": "User lost, I'm stopping till you come back in my field of view.",
     "stop": "Stopping now.",
+    "end session":"Ending session, see you later!",
     "tracking again": "I’m tracking you again."
 }
-
 
 # ------------------------------------------------------------------------------
 # TCP SERVER CLASSES & FUNCTIONS
