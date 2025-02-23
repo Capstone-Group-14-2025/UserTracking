@@ -209,7 +209,7 @@ class RoboEyesApp:
             self.blink_in_progress = True
             self.left_eye_open = False
             self.right_eye_open = False
-            self.root.after(100, self.end_blink)  # Blink duration
+            self.root.after(50, self.end_blink)  # Blink duration
 
     def end_blink(self):
         self.left_eye_open = True
@@ -521,7 +521,7 @@ class RoboEyesApp:
                 print("Unknown command:", cmd)
 
         # Schedule the next command check
-        self.root.after(100, self.process_commands)  # Check every 100 ms
+        self.root.after(50, self.process_commands)  # Check every 100 ms
 
 def main():
 

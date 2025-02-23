@@ -9,5 +9,8 @@ pkill vlc
 echo "Hostname: $(hostname)"
 echo "IP Address: $(hostname -I)"
 
-# Run the Python script
+# 1) Start the conversation code in the background, no GUI:
+python3 /home/comrade/AI_Conversation_TCPIP.py &
+
+# 2) Start the Eyes code in the foreground with GUI:
 python3 /home/comrade/Eyes_TCPIP.py

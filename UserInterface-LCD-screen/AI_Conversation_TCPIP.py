@@ -8,6 +8,7 @@ Description:
     - Handles live microphone input using PyAudio, and plays AI-generated audio to the speaker using OpenAI Realtime API.
     - Interrupts ongoing speech on receiving certain alerts, and speaks out custom or predefined messages.
     - NOTE: Works with python 3.12.8, later versions I tested had issues with pyaudio.
+    - NOTE: worked with v.11 of pyaudio, later versions had issues with the code.
 """
 
 import asyncio
@@ -33,14 +34,15 @@ SAMPLE_RATE = 24000
 CHUNK_SIZE = 512
 
 HOST = "0.0.0.0"
-PORT = 5555
+PORT = 54321
 
 ALERT_MESSAGES = {
-    "start": "We’re now getting started. Please stand in front of me at the distance you want.",
+    "start": "We’re now getting started. Please stand in front of me at the distance you want and press calibrate when you are ready.",
     "calibration complete": "Calibration done. I’m now following you.",
     "obstacle detected": "Obstacle detected, stopping now.",
-    "user lost": "User lost, please come back.",
-    "stop": "Stopping now, bye."
+    "user lost": "User lost, please come back in my field of view.",
+    "stop": "Stopping now.",
+    "tracking again": "I’m tracking you again."
 }
 
 
