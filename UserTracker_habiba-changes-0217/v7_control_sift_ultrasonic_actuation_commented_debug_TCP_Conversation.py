@@ -402,8 +402,8 @@ class UltrasonicManager:
 
     # Hardcoded sensor pins: front and left.
     SENSORS = {
-        "front": {"TRIG": 11, "ECHO": 12},
-        "left":  {"TRIG": 13, "ECHO": 16},
+        "back": {"TRIG": 11, "ECHO": 12},
+        "front":  {"TRIG": 13, "ECHO": 16},
     }
 
     TIMEOUT = 0.04  # Timeout in seconds to avoid an infinite loop if no echo is received.
@@ -797,21 +797,22 @@ class UserTrackerApp:
         """
         Signals that we want to stop all tracking and motion.
         """
-        # # Send message to TCPIP
-        # self.conversation_client.send("stop")
+        # Send message to TCPIP
+        self.conversation_client.send("stop")
         print("[Debug] Stop requested.")
         if self.serial_enabled and self.serial_sender:
             self.serial_sender.send_wheel_velocities(0, 0)
-
-        try:
-            if self.pose_estimator and self.pose_estimator.pose:
-                self.pose_estimator.pose.close()
-                self.pose_estimator.pose = None
-                print("[Debug] Closed MediaPipe Pose.")
-        except Exception as e:
-            print(f"[Warning] Error closing the MediaPipe Pose object: {e}")
-
         self.pending_stop = True
+
+        # try:
+        #     if self.pose_estimator and self.pose_estimator.pose:
+        #         self.pose_estimator.pose.close()
+        #         self.pose_estimator.pose = None
+        #         print("[Debug] Closed MediaPipe Pose.")
+        # except Exception as e:
+        #     print(f"[Warning] Error closing the MediaPipe Pose object: {e}")
+
+
 
     def request_calibration(self):
         """
@@ -959,7 +960,6 @@ class UserTrackerApp:
             if dist_cm is not None and dist_cm < stop_threshold_cm:
                 print(f"[Emergency Stop] Obstacle at {dist_cm} cm on sensor '{sensor_name}'")
                 self.conversation_client.send("obstacle detected")
-                self.request_stop()
                 return True
         return False
 
@@ -976,6 +976,13 @@ class UserTrackerApp:
         last_time_polled = time.time()
 
         while True:
+
+            # Check ultrasonic for emergency.
+            if self.ultrasonic_enabled:
+                print(f"[Emergency Stop] Activating emergency stop.")
+                if self._check_ultrasonic_emergency_stop():
+                    self.request_stop()
+
             # Check if user requested to stop.
             if self.pending_stop:
                 self.send_status_update("Tracking Stopped")
@@ -983,12 +990,6 @@ class UserTrackerApp:
                     self.serial_sender.send_wheel_velocities(0, 0)
                 print("[Debug] Stopping tracking loop.")
                 break
-
-            # Check ultrasonic for emergency.
-            if self.ultrasonic_enabled:
-                if self._check_ultrasonic_emergency_stop():
-                    # We just performed a request_stop(), so break out.
-                    break
 
             frame = self.camera_manager.get_latest_frame()
             if frame is None:
@@ -998,9 +999,8 @@ class UserTrackerApp:
             if self.debug_keys:
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     self.send_status_update("Tracking Stopped")
-                    if self.serial_enabled and self.serial_sender:
-                        self.serial_sender.send_wheel_velocities(0, 0)
                     print("[Debug] Stopping tracking loop via key.")
+                    self.request_stop()
                     break
 
             now = time.time()
@@ -1065,11 +1065,11 @@ class UserTrackerApp:
                 else:
                     self.LCD_client.send("straight")
 
-            if self.tcp_enabled:
-                if distance_est is not None and self.target_distance - distance_est > 0.3:
-                    self.LCD_client.send("happy")
-                else:
-                    self.LCD_client.send("neutral")
+            # if self.tcp_enabled:
+            #     if distance_est is not None and self.target_distance - distance_est > 0.3:
+            #         self.LCD_client.send("happy")
+            #     else:
+            #         self.LCD_client.send("neutral")
 
             # Send velocities if serial is enabled.
             if self.serial_enabled and self.serial_sender:

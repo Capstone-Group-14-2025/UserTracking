@@ -1249,7 +1249,7 @@ def main():
         max_speed=0.4,
         emergency_stop_distance=0.25, 
         tcp_enabled=False,
-        tcp_host_ip="140.193.235.72",
+        tcp_host_ip="140.193.238.152",
         tcp_LCD_port=12345,
         tcp_conversation_port=54321, 
         background_sift_check_interval = 3.0, 
